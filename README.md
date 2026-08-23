@@ -17,3 +17,4 @@ Recovered from the working v43.6 deployment and updated so new podcast audio use
 3. Upload a short podcast as a draft, publish it, and verify playback and byte-range seeking.
 
 The current v43.6 production deployment should remain available until the v44 test passes.
+Cloudflare Workers Builds connected.
