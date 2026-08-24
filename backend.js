@@ -277,7 +277,7 @@
   const IMAGE_TYPES = new Set(['image/jpeg','image/png','image/webp']);
   const AUDIO_TYPES = new Set(['audio/mpeg','audio/mp4','audio/x-m4a','audio/wav','audio/x-wav','audio/flac','audio/x-flac']);
   const IMAGE_MAX = 12 * 1024 * 1024;
-  const AUDIO_MAX = 95 * 1024 * 1024;
+  const AUDIO_MAX = 50 * 1024 * 1024;
 
   function pickedFile(form, name){
     const f=form.elements[name]?.files?.[0];
@@ -345,7 +345,7 @@
     } else {
       const ok=AUDIO_TYPES.has(file.type) || /\.(mp3|m4a|wav|flac)$/i.test(file.name);
       if(!ok) throw new Error('Audio must be MP3, M4A, WAV or FLAC.');
-      if(file.size>AUDIO_MAX) throw new Error('Audio is larger than the current 95 MB limit.');
+      if(file.size>AUDIO_MAX) throw new Error('Audio is larger than the current 50 MB limit.');
     }
     const {data:{session}}=await sb.auth.getSession();
     if(!session?.user) throw new Error('Your contributor session has expired. Please sign in again.');
