@@ -2,6 +2,8 @@ const SUPABASE_URL = "https://yzeprmubwogcscmnvoow.supabase.co";
 const SUPABASE_KEY = "sb_publishable_aMVnZ7Bjz0SVES1T3TNy0Q_S1z-juft";
 
 const MAX_AUDIO_BYTES = 50 * 1024 * 1024;
+const MAX_MULTIPART_AUDIO_BYTES = 200 * 1024 * 1024;
+const MULTIPART_PART_SIZE = 10 * 1024 * 1024;
 
 const AUDIO_TYPES = new Set([
   "audio/mpeg",
@@ -23,7 +25,7 @@ function cors(request) {
   const origin = request.headers.get("Origin");
 
   const headers = new Headers({
-    "Access-Control-Allow-Methods": "GET, HEAD, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Filename, Range",
     "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges, ETag",
     "Access-Control-Max-Age": "86400",
@@ -141,6 +143,30 @@ function getR2Key(value) {
   return value.slice(3);
 }
 
+function canManageKey(auth, key) {
+  return !!(
+    auth &&
+    key &&
+    (auth.profile.role === "admin" || key.startsWith(`${auth.user.id}/`))
+  );
+}
+
+function validMultipartParts(parts) {
+  return (
+    Array.isArray(parts) &&
+    parts.length > 0 &&
+    parts.length <= 10000 &&
+    parts.every(
+      (part) =>
+        Number.isInteger(Number(part?.partNumber)) &&
+        Number(part.partNumber) >= 1 &&
+        Number(part.partNumber) <= 10000 &&
+        typeof part?.etag === "string" &&
+        part.etag.length > 0
+    )
+  );
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -218,6 +244,97 @@ export default {
         },
         201
       );
+    }
+
+
+    if (url.pathname === "/multipart/create" && request.method === "POST") {
+      const origin = request.headers.get("Origin");
+      if (!allowedOrigin(origin)) return reply(request, { error: "Origin not allowed" }, 403);
+      const auth = await contributor(request);
+      if (!auth) return reply(request, { error: "Unauthorized" }, 401);
+
+      let data;
+      try { data = await request.json(); } catch { return reply(request, { error: "Invalid request" }, 400); }
+      const contentType = String(data?.content_type || "").split(";")[0].toLowerCase();
+      const size = Number(data?.size || 0);
+      if (!AUDIO_TYPES.has(contentType)) return reply(request, { error: "Unsupported audio type" }, 415);
+      if (!Number.isFinite(size) || size <= 0) return reply(request, { error: "Invalid audio size" }, 400);
+      if (size > MAX_MULTIPART_AUDIO_BYTES) return reply(request, { error: "Audio file exceeds 200 MB" }, 413);
+
+      const filename = String(data?.filename || "audio");
+      const ext = extension(filename, contentType);
+      const key = `${auth.user.id}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+      try {
+        const upload = await env.AUDIO_BUCKET.createMultipartUpload(key, {
+          httpMetadata: { contentType, cacheControl: "private, max-age=0, no-store" },
+          customMetadata: { owner: auth.user.id },
+        });
+        return reply(request, { key, upload_id: upload.uploadId, audio_url: `r2:${key}`, part_size: MULTIPART_PART_SIZE }, 201);
+      } catch (error) {
+        return reply(request, { error: `Could not start multipart upload: ${String(error?.message || error)}` }, 500);
+      }
+    }
+
+    if (url.pathname === "/multipart/part" && request.method === "PUT") {
+      const origin = request.headers.get("Origin");
+      if (!allowedOrigin(origin)) return reply(request, { error: "Origin not allowed" }, 403);
+      const auth = await contributor(request);
+      if (!auth) return reply(request, { error: "Unauthorized" }, 401);
+      const key = url.searchParams.get("key") || "";
+      const uploadId = url.searchParams.get("uploadId") || "";
+      const partNumber = Number(url.searchParams.get("partNumber") || 0);
+      if (!canManageKey(auth, key)) return reply(request, { error: "Forbidden" }, 403);
+      if (!uploadId || !Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10000 || !request.body) {
+        return reply(request, { error: "Invalid multipart part request" }, 400);
+      }
+      const size = Number(request.headers.get("Content-Length") || 0);
+      if (size > MULTIPART_PART_SIZE) return reply(request, { error: "Multipart part is too large" }, 413);
+      try {
+        const upload = env.AUDIO_BUCKET.resumeMultipartUpload(key, uploadId);
+        const part = await upload.uploadPart(partNumber, request.body);
+        return reply(request, { partNumber: part.partNumber, etag: part.etag });
+      } catch (error) {
+        return reply(request, { error: `Multipart part failed: ${String(error?.message || error)}` }, 400);
+      }
+    }
+
+    if (url.pathname === "/multipart/complete" && request.method === "POST") {
+      const origin = request.headers.get("Origin");
+      if (!allowedOrigin(origin)) return reply(request, { error: "Origin not allowed" }, 403);
+      const auth = await contributor(request);
+      if (!auth) return reply(request, { error: "Unauthorized" }, 401);
+      let data;
+      try { data = await request.json(); } catch { return reply(request, { error: "Invalid request" }, 400); }
+      const key = String(data?.key || "");
+      const uploadId = String(data?.upload_id || "");
+      if (!canManageKey(auth, key)) return reply(request, { error: "Forbidden" }, 403);
+      if (!uploadId || !validMultipartParts(data?.parts)) return reply(request, { error: "Invalid multipart completion request" }, 400);
+      try {
+        const upload = env.AUDIO_BUCKET.resumeMultipartUpload(key, uploadId);
+        const parts = data.parts.map((part) => ({ partNumber: Number(part.partNumber), etag: String(part.etag) }));
+        await upload.complete(parts);
+        return reply(request, { audio_url: `r2:${key}` });
+      } catch (error) {
+        return reply(request, { error: `Could not complete multipart upload: ${String(error?.message || error)}` }, 400);
+      }
+    }
+
+    if (url.pathname === "/multipart/abort" && request.method === "POST") {
+      const origin = request.headers.get("Origin");
+      if (!allowedOrigin(origin)) return reply(request, { error: "Origin not allowed" }, 403);
+      const auth = await contributor(request);
+      if (!auth) return reply(request, { error: "Unauthorized" }, 401);
+      let data;
+      try { data = await request.json(); } catch { return reply(request, { error: "Invalid request" }, 400); }
+      const key = String(data?.key || "");
+      const uploadId = String(data?.upload_id || "");
+      if (!canManageKey(auth, key)) return reply(request, { error: "Forbidden" }, 403);
+      if (!uploadId) return reply(request, { error: "Invalid multipart abort request" }, 400);
+      try {
+        const upload = env.AUDIO_BUCKET.resumeMultipartUpload(key, uploadId);
+        await upload.abort();
+      } catch {}
+      return reply(request, { aborted: true });
     }
 
     if (url.pathname === "/object" && request.method === "DELETE") {
