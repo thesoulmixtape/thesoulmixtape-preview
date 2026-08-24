@@ -74,7 +74,13 @@
     return [row.id,row.title,row.artist || '#TheSoulMixtape',row.genre || 'Soul',String(row.release_year || ''),`art${(idx%5)+1}`,row.audio_url || '',row.artwork_url || ''];
   }
   function remotePod(row){
-    return [row.id,row.title,'Crate Diggers Podcast','Podcast',row.published_at ? String(new Date(row.published_at).getFullYear()) : '', 'pod', row.audio_url || '', row.artwork_url || ''];
+    return [row.id,row.title,'Crate Diggers Podcast','Podcast',row.published_at ? String(new Date(row.published_at).getFullYear()) : '', 'pod', row.audio_url || '', row.artwork_url || '', row.description || '', row.episode_number || '', row.published_at || '', row.duration_seconds || 0];
+  }
+  function podcastDate(value){
+    if(!value) return '';
+    const d=new Date(value);
+    if(Number.isNaN(d.getTime())) return '';
+    return new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}).format(d);
   }
 
   // Upgrade artwork rendering for database-backed items.
@@ -104,7 +110,10 @@
       pods.splice(0, pods.length, ...mapped);
       items=[...tracks,...pods];
       const ep=qs('#eps');
-      if(ep){ep.innerHTML=pods.map(x=>`<div class="card" style="min-height:150px;margin:12px 0"><h3>${esc(x[1])}</h3><p>${esc(x[2])}</p><div><button class="btn" data-play="${esc(x[0])}">Play</button> <button class="btn" data-add="${esc(x[0])}">+</button></div></div>`).join('');bind(ep)}
+      if(ep){ep.innerHTML=pods.map(x=>{
+        const meta=[x[9]?`Episode ${x[9]}`:'',podcastDate(x[10])].filter(Boolean).join(' · ');
+        return `<article class="episode-card"><img class="episode-art" src="${esc(x[7]||'pod.png')}" alt="${esc(x[1])}"><div class="episode-copy"><div class="episode-kicker">${esc(meta||'Crate Diggers Podcast')}</div><h3>${esc(x[1])}</h3>${x[8]?`<p>${esc(x[8])}</p>`:''}<div class="episode-actions"><button class="btn" data-play="${esc(x[0])}">Play episode</button><button class="btn" data-add="${esc(x[0])}">+ Queue</button></div></div></article>`;
+      }).join('');bind(ep)}
     }
   }
 
@@ -268,7 +277,7 @@
   const IMAGE_TYPES = new Set(['image/jpeg','image/png','image/webp']);
   const AUDIO_TYPES = new Set(['audio/mpeg','audio/mp4','audio/x-m4a','audio/wav','audio/x-wav','audio/flac','audio/x-flac']);
   const IMAGE_MAX = 12 * 1024 * 1024;
-  const AUDIO_MAX = 50 * 1024 * 1024;
+  const AUDIO_MAX = 95 * 1024 * 1024;
 
   function pickedFile(form, name){
     const f=form.elements[name]?.files?.[0];
@@ -336,7 +345,7 @@
     } else {
       const ok=AUDIO_TYPES.has(file.type) || /\.(mp3|m4a|wav|flac)$/i.test(file.name);
       if(!ok) throw new Error('Audio must be MP3, M4A, WAV or FLAC.');
-      if(file.size>AUDIO_MAX) throw new Error('Audio is larger than the current 50 MB limit.');
+      if(file.size>AUDIO_MAX) throw new Error('Audio is larger than the current 95 MB limit.');
     }
     const {data:{session}}=await sb.auth.getSession();
     if(!session?.user) throw new Error('Your contributor session has expired. Please sign in again.');
@@ -454,6 +463,96 @@
       if(submit) submit.disabled=false;
     }
   }
+  let editingPodcast=null;
+  function closePodcastEditor(){
+    const wrap=qs('#podcastEditWrap'), form=qs('#podcastEditForm');
+    if(wrap) wrap.hidden=true;
+    if(form){ form.reset(); showMessage(form,''); }
+    editingPodcast=null;
+  }
+  async function openPodcastEditor(id){
+    closeTrackEditor();
+    const wrap=qs('#podcastEditWrap'), form=qs('#podcastEditForm');
+    if(!wrap || !form) return;
+    wrap.hidden=false;
+    showMessage(form,'Loading episode…');
+    wrap.scrollIntoView({behavior:'smooth',block:'start'});
+    const {data,error}=await sb.from('podcast_episodes').select('id,title,description,episode_number,published_at,artwork_url,audio_url,status,created_by').eq('id',id).single();
+    if(error){showMessage(form,error.message,true);return;}
+    editingPodcast=data;
+    form.elements.id.value=data.id;
+    form.elements.title.value=data.title || '';
+    form.elements.description.value=data.description || '';
+    form.elements.episode_number.value=data.episode_number || '';
+    form.elements.published_at.value=data.published_at ? new Date(data.published_at).toISOString().slice(0,10) : '';
+    const img=qs('#editPodcastArtworkPreview');
+    if(img){
+      if(data.artwork_url){img.src=data.artwork_url;img.style.visibility='visible';}
+      else{img.src='pod.png';img.style.visibility='visible';}
+    }
+    const title=qs('#editPodcastCurrentTitle'); if(title) title.textContent=data.title || 'Episode';
+    const status=qs('#editPodcastStatus'); if(status) status.textContent=`Current status: ${data.status}. Saving edits will not change it.`;
+    const audio=qs('#editPodcastAudioCurrent'); if(audio) audio.textContent=data.audio_url ? `Current audio: ${shortMediaName(data.audio_url)}` : 'No audio currently attached.';
+    showMessage(form,'');
+  }
+
+  async function savePodcastEdits(form){
+    if(!editingPodcast) return;
+    const submit=qs('button[type="submit"]',form);
+    const uploads=[];
+    if(submit) submit.disabled=true;
+    try{
+      const raw=Object.fromEntries(new FormData(form).entries());
+      const title=textValue(raw.title).trim();
+      if(!title) throw new Error('Episode title is required.');
+      let artworkUrl=editingPodcast.artwork_url || null;
+      let audioPath=editingPodcast.audio_url || null;
+      const artFile=pickedFile(form,'artwork_file');
+      const audioFile=pickedFile(form,'audio_file');
+      if(artFile){
+        showMessage(form,'Uploading replacement artwork…');
+        const up=await uploadMedia(artFile,'tsm-artwork','image'); uploads.push(up); artworkUrl=up.url;
+      }
+      if(audioFile){
+        showMessage(form,'Uploading replacement audio…');
+        const up=await uploadMedia(audioFile,'r2-audio','audio'); uploads.push(up); audioPath=up.url;
+      }
+      if(editingPodcast.status==='published' && !audioPath) throw new Error('A published episode must have an audio file.');
+      showMessage(form,'Saving episode…');
+      const patch={
+        title,
+        description:textValue(raw.description).trim()||null,
+        episode_number:raw.episode_number?Number(raw.episode_number):null,
+        published_at:raw.published_at?new Date(raw.published_at+'T12:00:00Z').toISOString():editingPodcast.published_at,
+        artwork_url:artworkUrl,
+        audio_url:audioPath
+      };
+      const {error}=await sb.from('podcast_episodes').update(patch).eq('id',editingPodcast.id);
+      if(error) throw error;
+
+      const old=[];
+      if(artFile && editingPodcast.artwork_url){
+        const path=artworkStoragePath(editingPodcast.artwork_url);
+        if(path) old.push({bucket:'tsm-artwork',path});
+      }
+      if(audioFile && editingPodcast.audio_url){
+        if(String(editingPodcast.audio_url).startsWith('r2:')) old.push({bucket:'r2-audio',path:editingPodcast.audio_url});
+        else if(!/^https?:\/\//i.test(editingPodcast.audio_url)) old.push({bucket:'tsm-audio',path:editingPodcast.audio_url});
+      }
+      if(old.length) await cleanupUploads(old);
+
+      showMessage(form,'Episode changes saved.');
+      await loadContentList();
+      await loadPublishedContent();
+      setTimeout(closePodcastEditor,350);
+    }catch(error){
+      if(uploads.length) await cleanupUploads(uploads);
+      showMessage(form,error?.message || 'Could not save episode.',true);
+    }finally{
+      if(submit) submit.disabled=false;
+    }
+  }
+
   async function saveWithUploads(form,table,buildPayload,specs){
     const submit=qs('button[type="submit"]',form);
     const uploads=[];
@@ -506,15 +605,20 @@
   const podcastForm=qs('#podcastForm');
   if(podcastForm) podcastForm.onsubmit=e=>{
     e.preventDefault();
-    saveWithUploads(podcastForm,'podcast_episodes',(r,u)=>({
-      title:textValue(r.title).trim(),
-      description:textValue(r.description).trim()||null,
-      episode_number:r.episode_number?Number(r.episode_number):null,
-      published_at:r.published_at?new Date(r.published_at+'T12:00:00Z').toISOString():null,
-      artwork_url:u.artwork_url,
-      audio_url:u.audio_url,
-      status:r.status
-    }),[
+    saveWithUploads(podcastForm,'podcast_episodes',(r,u)=>{
+      const title=textValue(r.title).trim();
+      if(!title) throw new Error('Episode title is required.');
+      if(r.status==='published' && !u.audio_url) throw new Error('A published episode must have an audio file.');
+      return {
+        title,
+        description:textValue(r.description).trim()||null,
+        episode_number:r.episode_number?Number(r.episode_number):null,
+        published_at:r.published_at?new Date(r.published_at+'T12:00:00Z').toISOString():(r.status==='published'?new Date().toISOString():null),
+        artwork_url:u.artwork_url,
+        audio_url:u.audio_url,
+        status:r.status
+      };
+    },[
       {input:'artwork_file',key:'artwork_url',bucket:'tsm-artwork',kind:'image',label:'artwork'},
       {input:'audio_file',key:'audio_url',bucket:'r2-audio',kind:'audio',label:'audio'}
     ]);
@@ -549,37 +653,49 @@
   if(trackEditForm) trackEditForm.onsubmit=e=>{e.preventDefault();saveTrackEdits(trackEditForm)};
   const cancelTrackEdit=qs('#cancelTrackEdit'); if(cancelTrackEdit) cancelTrackEdit.onclick=closeTrackEditor;
   const cancelTrackEditTop=qs('#cancelTrackEditTop'); if(cancelTrackEditTop) cancelTrackEditTop.onclick=closeTrackEditor;
+  const podcastEditForm=qs('#podcastEditForm');
+  if(podcastEditForm) podcastEditForm.onsubmit=e=>{e.preventDefault();savePodcastEdits(podcastEditForm)};
+  const cancelPodcastEdit=qs('#cancelPodcastEdit'); if(cancelPodcastEdit) cancelPodcastEdit.onclick=closePodcastEditor;
+  const cancelPodcastEditTop=qs('#cancelPodcastEditTop'); if(cancelPodcastEditTop) cancelPodcastEditTop.onclick=closePodcastEditor;
 
   async function loadContentList(){
     const list=qs('#contentList'); if(!list || !profile) return;
     list.innerHTML='<div class="empty">Loading…</div>';
     const [tr,po,ar]=await Promise.all([
       sb.from('tracks').select('id,title,status,created_by,created_at').order('created_at',{ascending:false}).limit(50),
-      sb.from('podcast_episodes').select('id,title,status,created_by,created_at').order('created_at',{ascending:false}).limit(50),
+      sb.from('podcast_episodes').select('id,title,status,created_by,created_at,published_at,audio_url').order('created_at',{ascending:false}).limit(50),
       sb.from('articles').select('id,title,status,created_by,created_at').order('created_at',{ascending:false}).limit(50)
     ]);
     const rows=[...(tr.data||[]).map(x=>({...x,type:'Music',table:'tracks'})),...(po.data||[]).map(x=>({...x,type:'Podcast',table:'podcast_episodes'})),...(ar.data||[]).map(x=>({...x,type:'Article',table:'articles'}))].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
     if(!rows.length){list.innerHTML='<div class="empty">No database content yet. The demo sleeves on the public site remain as placeholders until you publish your first real item.</div>';return;}
     list.innerHTML=rows.map(x=>{
       const canManage=profile.role==='admin'||x.created_by===profile.user_id;
+      const statusMeta=x.table==='podcast_episodes' ? ` data-published-at="${esc(x.published_at||'')}" data-has-audio="${x.audio_url?'1':'0'}"` : '';
       const primary=x.status==='published'
-        ? `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="draft">Unpublish</button>`
-        : `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="published">Publish</button>`;
+        ? `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="draft"${statusMeta}>Unpublish</button>`
+        : `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="published"${statusMeta}>Publish</button>`;
       const archive=x.status==='archived'
         ? `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="draft">Restore draft</button>`
         : `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="archived">Archive</button>`;
-      const edit=x.table==='tracks' ? `<button class="btn" data-edit-track="${esc(x.id)}">Edit</button>` : '';
+      const edit=x.table==='tracks' ? `<button class="btn" data-edit-track="${esc(x.id)}">Edit</button>` : x.table==='podcast_episodes' ? `<button class="btn" data-edit-podcast="${esc(x.id)}">Edit</button>` : '';
       return `<div class="content-row"><div><b>${esc(x.title)}</b><small>${esc(x.type)} · <span class="status-pill">${esc(x.status)}</span></small></div><div class="content-actions">${canManage?`${edit}${primary}${archive}<button class="btn danger" data-delete-table="${esc(x.table)}" data-delete-id="${esc(x.id)}">Delete</button>`:''}</div></div>`;
     }).join('');
-    qsa('[data-edit-track]',list).forEach(btn=>btn.onclick=()=>openTrackEditor(btn.dataset.editTrack));
+    qsa('[data-edit-track]',list).forEach(btn=>btn.onclick=()=>{closePodcastEditor();openTrackEditor(btn.dataset.editTrack)});
+    qsa('[data-edit-podcast]',list).forEach(btn=>btn.onclick=()=>openPodcastEditor(btn.dataset.editPodcast));
     qsa('[data-status-id]',list).forEach(btn=>btn.onclick=async()=>{
       const next=btn.dataset.status;
       const label=next==='published'?'Publish this item?':next==='draft'?'Move this item back to Draft?':'Archive this item?';
       if(!confirm(label)) return;
+      if(btn.dataset.statusTable==='podcast_episodes' && next==='published' && btn.dataset.hasAudio!=='1'){
+        alert('Add an audio file before publishing this episode.');
+        return;
+      }
       btn.disabled=true;
       const patch={status:next};
-      if((btn.dataset.statusTable==='articles'||btn.dataset.statusTable==='podcast_episodes')){
+      if(btn.dataset.statusTable==='articles'){
         patch.published_at=next==='published'?new Date().toISOString():null;
+      }else if(btn.dataset.statusTable==='podcast_episodes' && next==='published' && !btn.dataset.publishedAt){
+        patch.published_at=new Date().toISOString();
       }
       const {error}=await sb.from(btn.dataset.statusTable).update(patch).eq('id',btn.dataset.statusId);
       btn.disabled=false;
@@ -589,8 +705,25 @@
     });
     qsa('[data-delete-id]',list).forEach(btn=>btn.onclick=async()=>{
       if(!confirm('Delete this item?')) return;
+      let media=null;
+      if(btn.dataset.deleteTable==='podcast_episodes'){
+        const r=await sb.from('podcast_episodes').select('artwork_url,audio_url').eq('id',btn.dataset.deleteId).maybeSingle();
+        if(r.error){alert(r.error.message);return;}
+        media=r.data;
+      }
       const {error}=await sb.from(btn.dataset.deleteTable).delete().eq('id',btn.dataset.deleteId);
-      if(error){alert(error.message);return;} await loadContentList(); await loadPublishedContent();
+      if(error){alert(error.message);return;}
+      if(media){
+        const old=[];
+        const artPath=artworkStoragePath(media.artwork_url);
+        if(artPath) old.push({bucket:'tsm-artwork',path:artPath});
+        if(media.audio_url){
+          if(String(media.audio_url).startsWith('r2:')) old.push({bucket:'r2-audio',path:media.audio_url});
+          else if(!/^https?:\/\//i.test(media.audio_url)) old.push({bucket:'tsm-audio',path:media.audio_url});
+        }
+        if(old.length) await cleanupUploads(old);
+      }
+      await loadContentList(); await loadPublishedContent();
     });
   }
   const refresh=qs('#refreshContent'); if(refresh) refresh.onclick=loadContentList;
