@@ -57,6 +57,108 @@
     el.classList.toggle('error', !!isError);
   }
 
+  let passwordFlowActive=false;
+  let teamUsers=[];
+
+  function authReturnUrl(){
+    return `${location.origin}${location.pathname}`;
+  }
+
+  function openDashPanel(id){
+    qsa('.dash-tab').forEach(x=>x.classList.toggle('active',x.dataset.dash===id));
+    qsa('.dash-panel').forEach(x=>x.classList.toggle('on',x.id===id));
+    if(id==='teamPanel' && profile?.role==='admin') loadTeamList();
+  }
+
+  function showPasswordFlow(title, text){
+    passwordFlowActive=true;
+    if(typeof window.go==='function') window.go('contributors');
+    const login=qs('#contributorLogin'), dash=qs('#contributorDashboard'), setup=qs('#passwordSetup');
+    if(login) login.hidden=true;
+    if(dash) dash.hidden=true;
+    if(setup) setup.hidden=false;
+    if(qs('#passwordSetupTitle')) qs('#passwordSetupTitle').textContent=title || 'Choose a new password';
+    if(qs('#passwordSetupText')) qs('#passwordSetupText').textContent=text || 'Choose a strong new password for your contributor account.';
+    const form=qs('#passwordSetupForm');
+    if(form){ form.reset(); showMessage(form,''); }
+  }
+
+  function hidePasswordFlow(){
+    passwordFlowActive=false;
+    const setup=qs('#passwordSetup');
+    if(setup) setup.hidden=true;
+  }
+
+  async function invokeTeamAdmin(action, payload={}){
+    const {data,error}=await sb.functions.invoke('team-admin',{body:{action,...payload}});
+    if(error){
+      let message=error.message || 'Team administration request failed.';
+      try{
+        if(error.context && typeof error.context.json==='function'){
+          const detail=await error.context.json();
+          if(detail?.error) message=detail.error;
+        }
+      }catch{}
+      throw new Error(message);
+    }
+    if(data?.error) throw new Error(data.error);
+    return data || {};
+  }
+
+  function accountDate(value){
+    if(!value) return 'Never';
+    const d=new Date(value);
+    if(Number.isNaN(d.getTime())) return 'Never';
+    return new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(d);
+  }
+
+  function renderTeamList(users){
+    teamUsers=users || [];
+    const root=qs('#teamList');
+    if(!root) return;
+    if(!teamUsers.length){root.innerHTML='<div class="empty">No contributor accounts found.</div>';return;}
+    root.innerHTML=teamUsers.map(u=>`<div class="team-row ${u.active?'':'inactive'}"><div class="team-person"><b>${esc(u.display_name||u.email||'Contributor')}${u.is_self?'<span class="team-self">You</span>':''}</b><span>${esc(u.email||'')}</span><small>${u.active?'Active':'Inactive'} · ${u.role==='admin'?'Administrator':'Contributor'} · Last sign-in: ${esc(accountDate(u.last_sign_in_at))}</small></div><div class="team-actions"><select data-team-role="${esc(u.id)}" ${u.is_self?'disabled':''} aria-label="Role for ${esc(u.display_name||u.email||'user')}"><option value="contributor" ${u.role==='contributor'?'selected':''}>Contributor</option><option value="admin" ${u.role==='admin'?'selected':''}>Administrator</option></select><button class="btn" type="button" data-team-reset="${esc(u.id)}">Send reset</button>${u.is_self?'':`<button class="btn ${u.active?'danger':''}" type="button" data-team-active="${esc(u.id)}" data-next-active="${u.active?'false':'true'}">${u.active?'Deactivate':'Reactivate'}</button>`}</div></div>`).join('');
+
+    qsa('[data-team-role]',root).forEach(select=>select.addEventListener('change',async()=>{
+      const user=teamUsers.find(x=>String(x.id)===String(select.dataset.teamRole));
+      if(!user) return;
+      const next=select.value;
+      if(!confirm(`Change ${user.display_name || user.email} to ${next==='admin'?'Administrator':'Contributor'}?`)){renderTeamList(teamUsers);return;}
+      select.disabled=true;
+      try{await invokeTeamAdmin('set_role',{user_id:user.id,role:next});await loadTeamList();}
+      catch(error){alert(error.message);await loadTeamList();}
+    }));
+
+    qsa('[data-team-active]',root).forEach(btn=>btn.addEventListener('click',async()=>{
+      const user=teamUsers.find(x=>String(x.id)===String(btn.dataset.teamActive));
+      if(!user) return;
+      const active=btn.dataset.nextActive==='true';
+      const verb=active?'reactivate':'deactivate';
+      if(!confirm(`${verb[0].toUpperCase()+verb.slice(1)} ${user.display_name || user.email}?`)) return;
+      btn.disabled=true;
+      try{await invokeTeamAdmin('set_active',{user_id:user.id,active});await loadTeamList();}
+      catch(error){alert(error.message);await loadTeamList();}
+    }));
+
+    qsa('[data-team-reset]',root).forEach(btn=>btn.addEventListener('click',async()=>{
+      const user=teamUsers.find(x=>String(x.id)===String(btn.dataset.teamReset));
+      if(!user?.email) return;
+      btn.disabled=true;
+      const {error}=await sb.auth.resetPasswordForEmail(user.email,{redirectTo:authReturnUrl()});
+      btn.disabled=false;
+      if(error){alert(error.message);return;}
+      alert(`Password reset email sent to ${user.email}.`);
+    }));
+  }
+
+  async function loadTeamList(){
+    if(profile?.role!=='admin') return;
+    const root=qs('#teamList');
+    if(root) root.innerHTML='<div class="empty">Loading team…</div>';
+    try{const data=await invokeTeamAdmin('list');renderTeamList(data.users || []);}
+    catch(error){if(root) root.innerHTML=`<div class="empty">${esc(error.message)}</div>`;}
+  }
+
   async function loadSiteSettings(){
     const { data, error } = await sb.from('site_settings').select('key,value');
     if (error || !data) return;
@@ -260,7 +362,14 @@
 
   function setDashboardState(user, p){
     profile=p;
-    const login=qs('#contributorLogin'), dash=qs('#contributorDashboard');
+    const login=qs('#contributorLogin'), dash=qs('#contributorDashboard'), setup=qs('#passwordSetup');
+    if(passwordFlowActive){
+      if(login) login.hidden=true;
+      if(dash) dash.hidden=true;
+      if(setup) setup.hidden=false;
+      return;
+    }
+    if(setup) setup.hidden=true;
     const allowed=!!(user && p && p.active);
     if(login) login.hidden=allowed;
     if(dash) dash.hidden=!allowed;
@@ -268,6 +377,7 @@
       qs('#welcomeContributor').textContent=`Signed in as ${p.display_name} · ${p.role}`;
       qsa('.admin-only').forEach(el=>el.classList.toggle('admin-hidden',p.role!=='admin'));
       loadContentList();
+      if(p.role==='admin') loadTeamList();
     }
   }
 
@@ -276,7 +386,12 @@
     if(authRefreshPromise) return authRefreshPromise;
     authRefreshPromise=(async()=>{
       const {data:{session}}=await sb.auth.getSession();
-      if(!session){ setDashboardState(null,null); return false; }
+      if(!session){ hidePasswordFlow(); setDashboardState(null,null); return false; }
+      if(session.user?.user_metadata?.needs_password){
+        showPasswordFlow('Set your contributor password','Your invitation has been accepted. Choose a password before entering The Back Room.');
+        return false;
+      }
+      if(passwordFlowActive) return false;
       try{
         const p=await getProfileWithRetry(session.user.id);
         if(!p || !p.active){
@@ -316,10 +431,78 @@
   const logout=qs('#logoutBtn');
   if(logout) logout.onclick=async()=>{await sb.auth.signOut();setDashboardState(null,null)};
 
-  qsa('.dash-tab').forEach(btn=>btn.addEventListener('click',()=>{
-    qsa('.dash-tab').forEach(x=>x.classList.remove('active')); btn.classList.add('active');
-    qsa('.dash-panel').forEach(x=>x.classList.toggle('on',x.id===btn.dataset.dash));
-  }));
+  const forgotPasswordBtn=qs('#forgotPasswordBtn');
+  if(forgotPasswordBtn) forgotPasswordBtn.onclick=async()=>{
+    const email=qs('#loginEmail')?.value?.trim() || '';
+    const loginForm=qs('#login');
+    if(!email){showMessage(loginForm,'Enter your email address above first.',true);return;}
+    showMessage(loginForm,'Sending password reset email…');
+    const {error}=await sb.auth.resetPasswordForEmail(email,{redirectTo:authReturnUrl()});
+    if(error){showMessage(loginForm,error.message,true);return;}
+    showMessage(loginForm,'If that email is registered, a secure password reset link has been sent.');
+  };
+
+  const passwordSetupForm=qs('#passwordSetupForm');
+  if(passwordSetupForm) passwordSetupForm.onsubmit=async e=>{
+    e.preventDefault();
+    const password=passwordSetupForm.elements.password.value;
+    const confirmPassword=passwordSetupForm.elements.confirm_password.value;
+    if(password.length<10){showMessage(passwordSetupForm,'Use at least 10 characters.',true);return;}
+    if(password!==confirmPassword){showMessage(passwordSetupForm,'The passwords do not match.',true);return;}
+    showMessage(passwordSetupForm,'Saving new password…');
+    const {error}=await sb.auth.updateUser({password,data:{needs_password:false}});
+    if(error){showMessage(passwordSetupForm,error.message,true);return;}
+    hidePasswordFlow();
+    const ok=await refreshSessionUI(false);
+    if(ok){
+      openDashPanel('accountPanel');
+      const accountForm=qs('#changePasswordForm');
+      if(accountForm) showMessage(accountForm,'Password saved successfully.');
+    }
+  };
+
+  const passwordSetupCancel=qs('#passwordSetupCancel');
+  if(passwordSetupCancel) passwordSetupCancel.onclick=async()=>{
+    await sb.auth.signOut();
+    hidePasswordFlow();
+    setDashboardState(null,null);
+  };
+
+  const changePasswordForm=qs('#changePasswordForm');
+  if(changePasswordForm) changePasswordForm.onsubmit=async e=>{
+    e.preventDefault();
+    const password=changePasswordForm.elements.password.value;
+    const confirmPassword=changePasswordForm.elements.confirm_password.value;
+    if(password.length<10){showMessage(changePasswordForm,'Use at least 10 characters.',true);return;}
+    if(password!==confirmPassword){showMessage(changePasswordForm,'The passwords do not match.',true);return;}
+    showMessage(changePasswordForm,'Changing password…');
+    const {error}=await sb.auth.updateUser({password});
+    if(error){showMessage(changePasswordForm,error.message,true);return;}
+    changePasswordForm.reset();
+    showMessage(changePasswordForm,'Password changed successfully.');
+  };
+
+  const inviteUserForm=qs('#inviteUserForm');
+  if(inviteUserForm) inviteUserForm.onsubmit=async e=>{
+    e.preventDefault();
+    if(profile?.role!=='admin'){showMessage(inviteUserForm,'Administrator access required.',true);return;}
+    const displayName=inviteUserForm.elements.display_name.value.trim();
+    const email=inviteUserForm.elements.email.value.trim();
+    const role=inviteUserForm.elements.role.value;
+    showMessage(inviteUserForm,'Sending invitation…');
+    try{
+      await invokeTeamAdmin('invite',{display_name:displayName,email,role,redirect_to:authReturnUrl()});
+      inviteUserForm.reset();
+      inviteUserForm.elements.role.value='contributor';
+      showMessage(inviteUserForm,`Invitation sent to ${email}.`);
+      await loadTeamList();
+    }catch(error){showMessage(inviteUserForm,error.message,true);}
+  };
+
+  const refreshTeam=qs('#refreshTeam');
+  if(refreshTeam) refreshTeam.onclick=loadTeamList;
+
+  qsa('.dash-tab').forEach(btn=>btn.addEventListener('click',()=>openDashPanel(btn.dataset.dash)));
 
   const IMAGE_TYPES = new Set(['image/jpeg','image/png','image/webp']);
   const AUDIO_TYPES = new Set(['audio/mpeg','audio/mp4','audio/x-m4a','audio/wav','audio/x-wav','audio/flac','audio/x-flac']);
@@ -939,10 +1122,19 @@
   const refresh=qs('#refreshContent'); if(refresh) refresh.onclick=loadContentList;
 
   let authEventTimer=null;
-  sb.auth.onAuthStateChange((event)=>{
+  sb.auth.onAuthStateChange((event, session)=>{
     clearTimeout(authEventTimer);
+    if(event==='PASSWORD_RECOVERY'){
+      showPasswordFlow('Reset your password','Choose a new password for your #TheSoulMixtape contributor account.');
+      return;
+    }
     if(event==='SIGNED_OUT'){
+      hidePasswordFlow();
       setDashboardState(null,null);
+      return;
+    }
+    if(event==='SIGNED_IN' && session?.user?.user_metadata?.needs_password){
+      showPasswordFlow('Set your contributor password','Your invitation has been accepted. Choose a password before entering The Back Room.');
       return;
     }
     // Debounce auth events so sign-in/profile checks cannot race each other on Safari.
