@@ -1,7 +1,11 @@
 (() => {
   const SUPABASE_URL = 'https://yzeprmubwogcscmnvoow.supabase.co';
   const SUPABASE_KEY = 'sb_publishable_aMVnZ7Bjz0SVES1T3TNy0Q_S1z-juft';
-  const AUDIO_WORKER_URL = 'https://thesoulmixtape-media.thesoulmixtape.workers.dev';
+  const PRODUCTION_AUDIO_WORKER_URL = 'https://thesoulmixtape-media.thesoulmixtape.workers.dev';
+  const requestedAudioWorker = new URLSearchParams(location.search).get('audioWorker') || '';
+  const AUDIO_WORKER_URL = /^https:\/\/(?:[a-z0-9-]+-)?thesoulmixtape-media\.thesoulmixtape\.workers\.dev$/i.test(requestedAudioWorker)
+    ? requestedAudioWorker.replace(/\/$/,'')
+    : PRODUCTION_AUDIO_WORKER_URL;
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
   });
@@ -277,7 +281,9 @@
   const IMAGE_TYPES = new Set(['image/jpeg','image/png','image/webp']);
   const AUDIO_TYPES = new Set(['audio/mpeg','audio/mp4','audio/x-m4a','audio/wav','audio/x-wav','audio/flac','audio/x-flac']);
   const IMAGE_MAX = 12 * 1024 * 1024;
-  const AUDIO_MAX = 50 * 1024 * 1024;
+  const SINGLE_UPLOAD_MAX = 50 * 1024 * 1024;
+  const AUDIO_MAX = 200 * 1024 * 1024;
+  const MULTIPART_PART_SIZE = 10 * 1024 * 1024;
 
   function pickedFile(form, name){
     const f=form.elements[name]?.files?.[0];
@@ -307,8 +313,14 @@
     if(error) return '';
     return data?.signedUrl || '';
   }
-  async function uploadR2Audio(file,session){
+  async function responseJson(response){
+    let data=null;
+    try{data=await response.json();}catch{}
+    return data;
+  }
+  async function uploadR2Single(file,session,onProgress){
     const contentType=file.type || ({mp3:'audio/mpeg',m4a:'audio/mp4',wav:'audio/wav',flac:'audio/flac'}[cleanExt(file)] || 'application/octet-stream');
+    if(onProgress) onProgress(0);
     const response=await fetch(`${AUDIO_WORKER_URL}/upload`,{
       method:'POST',
       headers:{
@@ -318,10 +330,74 @@
       },
       body:file
     });
-    let data=null;
-    try{data=await response.json();}catch{}
+    const data=await responseJson(response);
     if(!response.ok || !data?.audio_url) throw new Error(data?.error || `R2 upload failed (${response.status}).`);
+    if(onProgress) onProgress(100);
     return {bucket:'r2-audio',path:data.audio_url,url:data.audio_url};
+  }
+  async function uploadR2Multipart(file,session,onProgress){
+    const contentType=file.type || ({mp3:'audio/mpeg',m4a:'audio/mp4',wav:'audio/wav',flac:'audio/flac'}[cleanExt(file)] || 'application/octet-stream');
+    const auth={'Authorization':`Bearer ${session.access_token}`};
+    let key='', uploadId='', audioUrl='';
+    try{
+      if(onProgress) onProgress(1);
+      const createResponse=await fetch(`${AUDIO_WORKER_URL}/multipart/create`,{
+        method:'POST',
+        headers:{...auth,'Content-Type':'application/json'},
+        body:JSON.stringify({filename:`audio.${cleanExt(file)}`,content_type:contentType,size:file.size})
+      });
+      const created=await responseJson(createResponse);
+      if(!createResponse.ok || !created?.upload_id || !created?.key) throw new Error(created?.error || `Could not start multipart upload (${createResponse.status}).`);
+      key=created.key; uploadId=created.upload_id; audioUrl=created.audio_url || `r2:${key}`;
+      const partSize=Number(created.part_size)||MULTIPART_PART_SIZE;
+      const totalParts=Math.ceil(file.size/partSize);
+      const parts=[];
+      for(let index=0;index<totalParts;index++){
+        const start=index*partSize, end=Math.min(start+partSize,file.size);
+        const chunk=file.slice(start,end,contentType);
+        let uploaded=null, lastError=null;
+        for(let attempt=1;attempt<=3;attempt++){
+          try{
+            const partResponse=await fetch(`${AUDIO_WORKER_URL}/multipart/part?key=${encodeURIComponent(key)}&uploadId=${encodeURIComponent(uploadId)}&partNumber=${index+1}`,{
+              method:'PUT',headers:auth,body:chunk
+            });
+            const partData=await responseJson(partResponse);
+            if(!partResponse.ok || !partData?.etag) throw new Error(partData?.error || `Part ${index+1} failed (${partResponse.status}).`);
+            uploaded={partNumber:Number(partData.partNumber||index+1),etag:partData.etag};
+            break;
+          }catch(error){
+            lastError=error;
+            if(attempt<3) await wait(500*attempt);
+          }
+        }
+        if(!uploaded) throw lastError || new Error(`Part ${index+1} failed.`);
+        parts.push(uploaded);
+        if(onProgress) onProgress(Math.min(95,Math.round(((index+1)/totalParts)*95)));
+      }
+      const completeResponse=await fetch(`${AUDIO_WORKER_URL}/multipart/complete`,{
+        method:'POST',
+        headers:{...auth,'Content-Type':'application/json'},
+        body:JSON.stringify({key,upload_id:uploadId,parts})
+      });
+      const completed=await responseJson(completeResponse);
+      if(!completeResponse.ok || !completed?.audio_url) throw new Error(completed?.error || `Could not finish multipart upload (${completeResponse.status}).`);
+      if(onProgress) onProgress(100);
+      return {bucket:'r2-audio',path:completed.audio_url||audioUrl,url:completed.audio_url||audioUrl};
+    }catch(error){
+      if(key && uploadId){
+        try{
+          await fetch(`${AUDIO_WORKER_URL}/multipart/abort`,{
+            method:'POST',headers:{...auth,'Content-Type':'application/json'},body:JSON.stringify({key,upload_id:uploadId})
+          });
+        }catch{}
+      }
+      throw error;
+    }
+  }
+  async function uploadR2Audio(file,session,onProgress){
+    return file.size<=SINGLE_UPLOAD_MAX
+      ? uploadR2Single(file,session,onProgress)
+      : uploadR2Multipart(file,session,onProgress);
   }
   async function deleteR2Audio(audioUrl){
     if(!audioUrl || !String(audioUrl).startsWith('r2:')) return;
@@ -337,7 +413,7 @@
       throw new Error(data?.error || `Could not remove old R2 audio (${response.status}).`);
     }
   }
-  async function uploadMedia(file,bucket,kind){
+  async function uploadMedia(file,bucket,kind,onProgress){
     if(!file) return null;
     if(kind==='image'){
       if(!IMAGE_TYPES.has(file.type)) throw new Error('Artwork must be a JPEG, PNG or WebP image.');
@@ -345,12 +421,12 @@
     } else {
       const ok=AUDIO_TYPES.has(file.type) || /\.(mp3|m4a|wav|flac)$/i.test(file.name);
       if(!ok) throw new Error('Audio must be MP3, M4A, WAV or FLAC.');
-      if(file.size>AUDIO_MAX) throw new Error('Audio is larger than the current 50 MB limit.');
+      if(file.size>AUDIO_MAX) throw new Error('Audio is larger than the current 200 MB limit.');
     }
     const {data:{session}}=await sb.auth.getSession();
     if(!session?.user) throw new Error('Your contributor session has expired. Please sign in again.');
     if(!profile?.active) throw new Error('This account is not approved for uploads.');
-    if(kind==='audio' && bucket==='r2-audio') return uploadR2Audio(file,session);
+    if(kind==='audio' && bucket==='r2-audio') return uploadR2Audio(file,session,onProgress);
     const token=(crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)+Date.now().toString(36));
     const path=`${session.user.id}/${Date.now()}-${token}.${cleanExt(file)}`;
     const {error}=await sb.storage.from(bucket).upload(path,file,{cacheControl:'3600',upsert:false,contentType:file.type || undefined});
@@ -426,7 +502,7 @@
       }
       if(audioFile){
         showMessage(form,'Uploading replacement audio…');
-        const up=await uploadMedia(audioFile,'r2-audio','audio'); uploads.push(up); audioPath=up.url;
+        const up=await uploadMedia(audioFile,'r2-audio','audio',pct=>showMessage(form,`Uploading replacement audio… ${pct}%`)); uploads.push(up); audioPath=up.url;
       }
       showMessage(form,'Saving changes…');
       const patch={
@@ -515,7 +591,7 @@
       }
       if(audioFile){
         showMessage(form,'Uploading replacement audio…');
-        const up=await uploadMedia(audioFile,'r2-audio','audio'); uploads.push(up); audioPath=up.url;
+        const up=await uploadMedia(audioFile,'r2-audio','audio',pct=>showMessage(form,`Uploading replacement audio… ${pct}%`)); uploads.push(up); audioPath=up.url;
       }
       if(editingPodcast.status==='published' && !audioPath) throw new Error('A published episode must have an audio file.');
       showMessage(form,'Saving episode…');
@@ -564,7 +640,7 @@
         const file=pickedFile(form,spec.input);
         if(!file){ urls[spec.key]=null; continue; }
         showMessage(form,`Uploading ${spec.label}…`);
-        const uploaded=await uploadMedia(file,spec.bucket,spec.kind);
+        const uploaded=await uploadMedia(file,spec.bucket,spec.kind,spec.kind==='audio'?pct=>showMessage(form,`Uploading ${spec.label}… ${pct}%`):null);
         uploads.push(uploaded); urls[spec.key]=uploaded.url;
       }
       showMessage(form,'Saving content…');
