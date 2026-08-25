@@ -87,6 +87,47 @@
     return new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}).format(d);
   }
 
+  let publishedArticles=[];
+  function slugifyArticle(value){
+    return textValue(value).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+  }
+  function articleBodyHtml(value){
+    const text=textValue(value).trim();
+    if(!text) return '<p class="copy">Article text coming soon.</p>';
+    return text.split(/\n{2,}/).filter(Boolean).map(block=>`<p>${esc(block).replace(/\n/g,'<br>')}</p>`).join('');
+  }
+  function renderPublishedArticles(rows){
+    publishedArticles=rows || [];
+    const root=qs('#featureList');
+    if(!root) return;
+    if(!publishedArticles.length){
+      root.innerHTML='<div class="empty" style="grid-column:1/-1">Features will live here as the site grows.</div>';
+      return;
+    }
+    root.innerHTML=publishedArticles.map(row=>{
+      const date=podcastDate(row.published_at || row.created_at);
+      const cover=row.cover_url
+        ? `<button class="feature-cover" type="button" data-open-article="${esc(row.id)}"><img src="${esc(row.cover_url)}" alt="${esc(row.title)}"></button>`
+        : `<button class="feature-cover" type="button" data-open-article="${esc(row.id)}"><span class="feature-cover-placeholder">From The Crates</span></button>`;
+      return `<article class="feature-card">${cover}<div class="feature-copy"><div class="feature-kicker">${esc(date || 'From The Crates')}</div><h3>${esc(row.title)}</h3>${row.excerpt?`<p>${esc(row.excerpt)}</p>`:''}<button class="btn" type="button" data-open-article="${esc(row.id)}">Read feature</button></div></article>`;
+    }).join('');
+    qsa('[data-open-article]',root).forEach(btn=>btn.onclick=()=>openPublishedArticle(btn.dataset.openArticle));
+  }
+  function openPublishedArticle(id){
+    const row=publishedArticles.find(x=>String(x.id)===String(id));
+    if(!row) return;
+    const title=qs('#articleTitle'), excerpt=qs('#articleExcerpt'), cover=qs('#articleCover'), body=qs('#articleBody'), meta=qs('#articleMeta');
+    if(title) title.textContent=row.title || 'Feature';
+    if(excerpt){ excerpt.textContent=row.excerpt || ''; excerpt.hidden=!row.excerpt; }
+    if(meta) meta.textContent=['From The Crates',podcastDate(row.published_at || row.created_at)].filter(Boolean).join(' · ');
+    if(cover){
+      if(row.cover_url){cover.src=row.cover_url;cover.alt=row.title || 'Feature cover';cover.hidden=false;}
+      else{cover.removeAttribute('src');cover.alt='';cover.hidden=true;}
+    }
+    if(body) body.innerHTML=articleBodyHtml(row.body);
+    if(typeof window.go==='function') window.go('article');
+  }
+
   // Upgrade artwork rendering for database-backed items.
   const originalArt = window.art;
   window.art = function(x){
@@ -95,9 +136,10 @@
   };
 
   async function loadPublishedContent(){
-    const [{data:t},{data:p}] = await Promise.all([
+    const [{data:t},{data:p},{data:a}] = await Promise.all([
       sb.from('tracks').select('*').eq('status','published').order('sort_order',{ascending:true}).order('created_at',{ascending:false}),
-      sb.from('podcast_episodes').select('*').eq('status','published').order('published_at',{ascending:false,nullsFirst:false})
+      sb.from('podcast_episodes').select('*').eq('status','published').order('published_at',{ascending:false,nullsFirst:false}),
+      sb.from('articles').select('id,title,slug,excerpt,body,cover_url,published_at,created_at').eq('status','published').order('published_at',{ascending:false,nullsFirst:false}).order('created_at',{ascending:false})
     ]);
     if (t && t.length){
       const hydrated=await Promise.all(t.map(async row=>({...row,audio_url:await signedAudioUrl(row.audio_url,row.id,'track')})));
@@ -119,6 +161,7 @@
         return `<article class="episode-card"><img class="episode-art" src="${esc(x[7]||'pod.png')}" alt="${esc(x[1])}"><div class="episode-copy"><div class="episode-kicker">${esc(meta||'Crate Diggers Podcast')}</div><h3>${esc(x[1])}</h3>${x[8]?`<p>${esc(x[8])}</p>`:''}<div class="episode-actions"><button class="btn" data-play="${esc(x[0])}">Play episode</button><button class="btn" data-add="${esc(x[0])}">+ Queue</button></div></div></article>`;
       }).join('');bind(ep)}
     }
+    renderPublishedArticles(a || []);
   }
 
   function ensureAudio(){
@@ -629,6 +672,82 @@
     }
   }
 
+  let editingArticle=null;
+  function closeArticleEditor(){
+    const wrap=qs('#articleEditWrap'), form=qs('#articleEditForm');
+    if(wrap) wrap.hidden=true;
+    if(form){form.reset();showMessage(form,'');}
+    const img=qs('#editArticleCoverPreview');
+    if(img){img.removeAttribute('src');img.classList.add('is-empty');}
+    editingArticle=null;
+  }
+  async function openArticleEditor(id){
+    closeTrackEditor();
+    closePodcastEditor();
+    const wrap=qs('#articleEditWrap'), form=qs('#articleEditForm');
+    if(!wrap || !form) return;
+    wrap.hidden=false;
+    showMessage(form,'Loading article…');
+    wrap.scrollIntoView({behavior:'smooth',block:'start'});
+    const {data,error}=await sb.from('articles').select('id,title,slug,excerpt,body,cover_url,status,published_at,created_by').eq('id',id).single();
+    if(error){showMessage(form,error.message,true);return;}
+    editingArticle=data;
+    form.elements.id.value=data.id;
+    form.elements.title.value=data.title || '';
+    form.elements.slug.value=data.slug || '';
+    form.elements.excerpt.value=data.excerpt || '';
+    form.elements.body.value=data.body || '';
+    const img=qs('#editArticleCoverPreview');
+    if(img){
+      if(data.cover_url){img.src=data.cover_url;img.classList.remove('is-empty');}
+      else{img.removeAttribute('src');img.classList.add('is-empty');}
+    }
+    const title=qs('#editArticleCurrentTitle'); if(title) title.textContent=data.title || 'Feature';
+    const status=qs('#editArticleStatus'); if(status) status.textContent=`Current status: ${data.status}.`;
+    showMessage(form,'');
+  }
+  async function saveArticleEdits(form){
+    if(!editingArticle) return;
+    const submit=qs('button[type="submit"]',form);
+    const uploads=[];
+    if(submit) submit.disabled=true;
+    try{
+      const raw=Object.fromEntries(new FormData(form).entries());
+      const title=textValue(raw.title).trim();
+      if(!title) throw new Error('Article title is required.');
+      const slug=slugifyArticle(raw.slug || title);
+      if(!slug) throw new Error('A valid article slug is required.');
+      let coverUrl=editingArticle.cover_url || null;
+      const coverFile=pickedFile(form,'cover_file');
+      if(coverFile){
+        showMessage(form,'Uploading replacement cover…');
+        const up=await uploadMedia(coverFile,'tsm-artwork','image');uploads.push(up);coverUrl=up.url;
+      }
+      showMessage(form,'Saving article…');
+      const patch={
+        title,slug,
+        excerpt:textValue(raw.excerpt).trim()||null,
+        body:textValue(raw.body).trim()||null,
+        cover_url:coverUrl
+      };
+      const {error}=await sb.from('articles').update(patch).eq('id',editingArticle.id);
+      if(error) throw error;
+      if(coverFile && editingArticle.cover_url){
+        const oldPath=artworkStoragePath(editingArticle.cover_url);
+        if(oldPath) await cleanupUploads([{bucket:'tsm-artwork',path:oldPath}]);
+      }
+      showMessage(form,'Article changes saved.');
+      await loadContentList();
+      await loadPublishedContent();
+      setTimeout(closeArticleEditor,350);
+    }catch(error){
+      if(uploads.length) await cleanupUploads(uploads);
+      showMessage(form,error?.message || 'Could not save article.',true);
+    }finally{
+      if(submit) submit.disabled=false;
+    }
+  }
+
   async function saveWithUploads(form,table,buildPayload,specs){
     const submit=qs('button[type="submit"]',form);
     const uploads=[];
@@ -703,15 +822,21 @@
   const articleForm=qs('#articleForm');
   if(articleForm) articleForm.onsubmit=e=>{
     e.preventDefault();
-    saveWithUploads(articleForm,'articles',(r,u)=>({
-      title:textValue(r.title).trim(),
-      slug:textValue(r.slug).trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''),
-      excerpt:textValue(r.excerpt).trim()||null,
-      body:textValue(r.body).trim()||null,
-      cover_url:u.cover_url,
-      status:r.status,
-      published_at:r.status==='published'?new Date().toISOString():null
-    }),[
+    saveWithUploads(articleForm,'articles',(r,u)=>{
+      const title=textValue(r.title).trim();
+      if(!title) throw new Error('Article title is required.');
+      const slug=slugifyArticle(r.slug || title);
+      if(!slug) throw new Error('A valid article slug is required.');
+      return {
+        title,
+        slug,
+        excerpt:textValue(r.excerpt).trim()||null,
+        body:textValue(r.body).trim()||null,
+        cover_url:u.cover_url,
+        status:r.status,
+        published_at:r.status==='published'?new Date().toISOString():null
+      };
+    },[
       {input:'cover_file',key:'cover_url',bucket:'tsm-artwork',kind:'image',label:'cover image'}
     ]);
   };
@@ -733,6 +858,10 @@
   if(podcastEditForm) podcastEditForm.onsubmit=e=>{e.preventDefault();savePodcastEdits(podcastEditForm)};
   const cancelPodcastEdit=qs('#cancelPodcastEdit'); if(cancelPodcastEdit) cancelPodcastEdit.onclick=closePodcastEditor;
   const cancelPodcastEditTop=qs('#cancelPodcastEditTop'); if(cancelPodcastEditTop) cancelPodcastEditTop.onclick=closePodcastEditor;
+  const articleEditForm=qs('#articleEditForm');
+  if(articleEditForm) articleEditForm.onsubmit=e=>{e.preventDefault();saveArticleEdits(articleEditForm)};
+  const cancelArticleEdit=qs('#cancelArticleEdit'); if(cancelArticleEdit) cancelArticleEdit.onclick=closeArticleEditor;
+  const cancelArticleEditTop=qs('#cancelArticleEditTop'); if(cancelArticleEditTop) cancelArticleEditTop.onclick=closeArticleEditor;
 
   async function loadContentList(){
     const list=qs('#contentList'); if(!list || !profile) return;
@@ -740,7 +869,7 @@
     const [tr,po,ar]=await Promise.all([
       sb.from('tracks').select('id,title,status,created_by,created_at').order('created_at',{ascending:false}).limit(50),
       sb.from('podcast_episodes').select('id,title,status,created_by,created_at,published_at,audio_url').order('created_at',{ascending:false}).limit(50),
-      sb.from('articles').select('id,title,status,created_by,created_at').order('created_at',{ascending:false}).limit(50)
+      sb.from('articles').select('id,title,status,created_by,created_at,published_at,cover_url').order('created_at',{ascending:false}).limit(50)
     ]);
     const rows=[...(tr.data||[]).map(x=>({...x,type:'Music',table:'tracks'})),...(po.data||[]).map(x=>({...x,type:'Podcast',table:'podcast_episodes'})),...(ar.data||[]).map(x=>({...x,type:'Article',table:'articles'}))].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
     if(!rows.length){list.innerHTML='<div class="empty">No database content yet. The demo sleeves on the public site remain as placeholders until you publish your first real item.</div>';return;}
@@ -753,11 +882,12 @@
       const archive=x.status==='archived'
         ? `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="draft">Restore draft</button>`
         : `<button class="btn" data-status-table="${esc(x.table)}" data-status-id="${esc(x.id)}" data-status="archived">Archive</button>`;
-      const edit=x.table==='tracks' ? `<button class="btn" data-edit-track="${esc(x.id)}">Edit</button>` : x.table==='podcast_episodes' ? `<button class="btn" data-edit-podcast="${esc(x.id)}">Edit</button>` : '';
+      const edit=x.table==='tracks' ? `<button class="btn" data-edit-track="${esc(x.id)}">Edit</button>` : x.table==='podcast_episodes' ? `<button class="btn" data-edit-podcast="${esc(x.id)}">Edit</button>` : x.table==='articles' ? `<button class="btn" data-edit-article="${esc(x.id)}">Edit</button>` : '';
       return `<div class="content-row"><div><b>${esc(x.title)}</b><small>${esc(x.type)} · <span class="status-pill">${esc(x.status)}</span></small></div><div class="content-actions">${canManage?`${edit}${primary}${archive}<button class="btn danger" data-delete-table="${esc(x.table)}" data-delete-id="${esc(x.id)}">Delete</button>`:''}</div></div>`;
     }).join('');
-    qsa('[data-edit-track]',list).forEach(btn=>btn.onclick=()=>{closePodcastEditor();openTrackEditor(btn.dataset.editTrack)});
-    qsa('[data-edit-podcast]',list).forEach(btn=>btn.onclick=()=>openPodcastEditor(btn.dataset.editPodcast));
+    qsa('[data-edit-track]',list).forEach(btn=>btn.onclick=()=>{closePodcastEditor();closeArticleEditor();openTrackEditor(btn.dataset.editTrack)});
+    qsa('[data-edit-podcast]',list).forEach(btn=>btn.onclick=()=>{closeArticleEditor();openPodcastEditor(btn.dataset.editPodcast)});
+    qsa('[data-edit-article]',list).forEach(btn=>btn.onclick=()=>openArticleEditor(btn.dataset.editArticle));
     qsa('[data-status-id]',list).forEach(btn=>btn.onclick=async()=>{
       const next=btn.dataset.status;
       const label=next==='published'?'Publish this item?':next==='draft'?'Move this item back to Draft?':'Archive this item?';
@@ -786,6 +916,10 @@
         const r=await sb.from('podcast_episodes').select('artwork_url,audio_url').eq('id',btn.dataset.deleteId).maybeSingle();
         if(r.error){alert(r.error.message);return;}
         media=r.data;
+      }else if(btn.dataset.deleteTable==='articles'){
+        const r=await sb.from('articles').select('cover_url').eq('id',btn.dataset.deleteId).maybeSingle();
+        if(r.error){alert(r.error.message);return;}
+        media=r.data ? {artwork_url:r.data.cover_url} : null;
       }
       const {error}=await sb.from(btn.dataset.deleteTable).delete().eq('id',btn.dataset.deleteId);
       if(error){alert(error.message);return;}
