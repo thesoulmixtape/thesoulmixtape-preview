@@ -305,6 +305,41 @@
     bindCrate();
   }
 
+  // Add real playback history so Previous can move backwards through
+  // tracks/episodes that have already left the Up Next queue.
+  const basePlay = window.play;
+  let playHistory = [];
+  let historyNavigation = false;
+
+  window.play = function(id){
+    const nextId = id == null ? '' : String(id);
+    const currentId = cur && cur[0] != null ? String(cur[0]) : '';
+    if(!historyNavigation && currentId && nextId && currentId !== nextId){
+      playHistory.push(currentId);
+      if(playHistory.length > 100) playHistory.shift();
+    }
+    historyNavigation = false;
+    return basePlay(id);
+  };
+
+  const previousButton = document.querySelector('#prev');
+  if(previousButton){
+    previousButton.onclick = () => {
+      if(!playHistory.length){
+        if(cur) window.play(cur[0]);
+        return;
+      }
+      const currentId = cur && cur[0] != null ? cur[0] : null;
+      const previousId = playHistory.pop();
+      if(currentId != null && String(currentId) !== String(previousId)){
+        q.unshift(currentId);
+        renderQ();
+      }
+      historyNavigation = true;
+      window.play(previousId);
+    };
+  }
+
   renderShell();
 
   // Replace the original basic renderer while preserving the same global name
