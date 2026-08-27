@@ -261,11 +261,8 @@
     `;
 
     document.querySelector('#trackBack')?.addEventListener('click', () => {
-      if(history.state?.tsmTrack && history.length > 1) history.back();
-      else {
-        clearTrackUrl(true);
-        go('music');
-      }
+      clearTrackUrl(true);
+      go('music');
     });
     document.querySelector('#trackPlay')?.addEventListener('click', () => window.play(track[0]));
     document.querySelector('#trackQueue')?.addEventListener('click', () => addUpNext(track[0]));
