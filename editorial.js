@@ -68,7 +68,7 @@
     .home-feature-cover img{width:100%;height:100%;object-fit:cover;display:block}
     .home-feature-placeholder{height:100%;min-height:330px;display:grid;place-items:center;background:radial-gradient(circle at 75% 20%,#6e542455,transparent 34%),linear-gradient(145deg,#211b13,#0e0c09);color:var(--gold);font:700 30px Georgia,serif}
     .home-feature-copy{padding:28px;display:flex;flex-direction:column;justify-content:center}
-    .home-feature-copy h3{font:700 clamp(29px,3vw,42px)/1.02 Georgia,serif;margin:7px 0 10px}
+    .home-feature-copy h3{font:700 clamp(29px,3vw,42px)/1.02 Georgia,serif;margin:7px 0 10px;color:var(--cream)}
     .home-feature-copy p{color:#a99d89;line-height:1.6;margin:0 0 15px}
     .feature-meta-line{color:var(--gold);font-size:9px;text-transform:uppercase;letter-spacing:.11em;font-weight:700}
     .home-crate-links{display:grid;grid-template-rows:1fr 1fr;gap:14px}
@@ -482,6 +482,63 @@
     setTimeout(()=>observer.disconnect(),120000);
   }
 
+  async function deleteContributorAccount(userId){
+    const {data,error}=await sb.functions.invoke('team-admin',{body:{action:'delete',user_id:userId}});
+    if(error){
+      let message=error.message || 'Could not delete contributor account.';
+      try{
+        if(error.context && typeof error.context.json==='function'){
+          const detail=await error.context.json();
+          if(detail?.error) message=detail.error;
+        }
+      }catch{}
+      throw new Error(message);
+    }
+    if(data?.error) throw new Error(data.error);
+    return data || {};
+  }
+
+  function installTeamDelete(){
+    const root=qs('#teamList');
+    if(!root) return;
+
+    const decorate=()=>{
+      qsa('.team-row',root).forEach(row=>{
+        if(row.querySelector('[data-v449-delete-user]')) return;
+        const status=qs('.team-person small',row)?.textContent || '';
+        if(!status.trim().startsWith('Inactive')) return;
+        const reactivate=qs('[data-team-active]',row);
+        const reset=qs('[data-team-reset]',row);
+        const userId=reactivate?.dataset.teamActive || reset?.dataset.teamReset || '';
+        if(!userId) return;
+        const actions=qs('.team-actions',row);
+        if(!actions) return;
+        const label=(qs('.team-person b',row)?.textContent || 'this contributor').replace(/\s*You\s*$/i,'').trim();
+        const btn=document.createElement('button');
+        btn.type='button';
+        btn.className='btn danger';
+        btn.dataset.v449DeleteUser=userId;
+        btn.textContent='Delete permanently';
+        btn.onclick=async()=>{
+          if(!confirm(`Permanently delete ${label}?\n\nThis removes the login completely and cannot be undone.`)) return;
+          btn.disabled=true;
+          try{
+            await deleteContributorAccount(userId);
+            row.remove();
+            alert(`${label} has been permanently deleted.`);
+          }catch(error){
+            btn.disabled=false;
+            alert(error?.message || 'Could not delete contributor account.');
+          }
+        };
+        actions.appendChild(btn);
+      });
+    };
+
+    decorate();
+    new MutationObserver(decorate).observe(root,{childList:true,subtree:true});
+  }
+
   function installArticleMetadataPersistence(){
     const add=qs('#articleForm'), edit=qs('#articleEditForm');
     addMetaFields(add,false);
@@ -540,6 +597,7 @@
   ensureCratesUi();
   ensureHomeUi();
   installArticleMetadataPersistence();
+  installTeamDelete();
 
   // Preserve the v44.8 navigation wrapper and add article URL cleanup on top.
   if(typeof window.go==='function'){
