@@ -817,13 +817,56 @@
     decoratePodcastCards();
   }
 
-  document.addEventListener(
+    document.addEventListener(
     'click',
     event => {
       const share =
         event.target.closest(
-          '#trackShare'
+          '#trackShare, .eng-share'
         );
+
+      if (!share) return;
+
+      let media = null;
+
+      if (share.id === 'trackShare') {
+        const id =
+          new URL(
+            location.href
+          ).searchParams.get(
+            'track'
+          );
+
+        media = mediaInfo(id);
+      } else {
+        const card =
+          share.closest(
+            '.episode-card'
+          );
+
+        const play =
+          card
+            ? qs(
+                '[data-play]',
+                card
+              )
+            : null;
+
+        media =
+          mediaInfo(
+            play?.dataset.play
+          );
+      }
+
+      if (media) {
+        recordEvent(
+          'share',
+          media
+        );
+      }
+    },
+    true
+  );
 
       if (!share) return;
 
@@ -848,44 +891,32 @@
   );
 
   function installNavigationTracking() {
-    const base = window.go;
+  document.addEventListener(
+    'click',
+    event => {
+      const nav =
+        event.target.closest('[data-go]');
 
-    if (
-      typeof base ===
-        'function' &&
-      !base.__tsmEngagement
-    ) {
-      const wrapped =
-        function () {
-          const result =
-            base.apply(
-              this,
-              arguments
-            );
+      if (!nav) return;
 
-          setTimeout(() => {
-            recordPageView();
-            decorate();
-          }, 0);
+      setTimeout(() => {
+        recordPageView();
+        decorate();
+      }, 50);
+    },
+    true
+  );
 
-          return result;
-        };
-
-      wrapped.__tsmEngagement =
-        true;
-
-      window.go = wrapped;
+  window.addEventListener(
+    'popstate',
+    () => {
+      setTimeout(() => {
+        recordPageView();
+        decorate();
+      }, 50);
     }
-
-    addEventListener(
-      'popstate',
-      () =>
-        setTimeout(() => {
-          recordPageView();
-          decorate();
-        }, 0)
-    );
-  }
+  );
+}
 
   function nicePage(path) {
     const map = {
