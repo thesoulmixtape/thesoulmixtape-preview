@@ -868,28 +868,6 @@
     true
   );
 
-      if (!share) return;
-
-      const id =
-        new URL(
-          location.href
-        ).searchParams.get(
-          'track'
-        );
-
-      const media =
-        mediaInfo(id);
-
-      if (media) {
-        recordEvent(
-          'share',
-          media
-        );
-      }
-    },
-    true
-  );
-
   function installNavigationTracking() {
   document.addEventListener(
     'click',
