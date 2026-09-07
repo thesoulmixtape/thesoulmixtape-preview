@@ -985,7 +985,42 @@
         })
       );
   }
+  function topDigs(
+    digs,
+    mediaType,
+    trackMap,
+    podMap
+  ) {
+    const counts = new Map();
 
+    digs
+      .filter(
+        d =>
+          d.media_type === mediaType &&
+          d.media_id
+      )
+      .forEach(d => {
+        const key = String(d.media_id);
+
+        counts.set(
+          key,
+          (counts.get(key) || 0) + 1
+        );
+      });
+
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([id, count]) => ({
+        name: mediaName(
+          id,
+          mediaType,
+          trackMap,
+          podMap
+        ),
+        count
+      }));
+  }
   function listHtml(rows) {
     if (!rows.length) {
       return (
@@ -1282,7 +1317,21 @@
         trackMap,
         podMap
       );
+    const topDugMusic =
+      topDigs(
+        digs,
+        'music',
+        trackMap,
+        podMap
+      );
 
+    const topDugPods =
+      topDigs(
+        digs,
+        'podcast',
+        trackMap,
+        podMap
+      );
     root.innerHTML = `
       <div class="analytics-grid">
 
@@ -1344,7 +1393,15 @@
           <h3>Most played podcast episodes</h3>
           ${listHtml(topPods)}
         </div>
+        <div class="analytics-box">
+          <h3>Most dug tracks</h3>
+          ${listHtml(topDugMusic)}
+        </div>
 
+        <div class="analytics-box">
+          <h3>Most dug podcast episodes</h3>
+          ${listHtml(topDugPods)}
+        </div>
         <div class="analytics-box">
           <h3>What this measures</h3>
 
