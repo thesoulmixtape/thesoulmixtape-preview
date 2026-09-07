@@ -86,4 +86,12 @@
   const syncBackTop = () => backTop.classList.toggle('on', window.scrollY > 650);
   addEventListener('scroll', syncBackTop, {passive:true});
   syncBackTop();
+    addEventListener('load', () => {
+    if(document.querySelector('script[data-v4412-engagement]')) return;
+
+    const script = document.createElement('script');
+    script.src = 'engagement.js';
+    script.dataset.v4412Engagement = 'yes';
+    document.body.appendChild(script);
+  }, { once: true });
 })();
