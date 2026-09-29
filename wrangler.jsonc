@@ -7,6 +7,10 @@
     {
       "binding": "AUDIO_BUCKET",
       "bucket_name": "thesoulmixtape-audio"
+    },
+    {
+      "binding": "ARTWORK_BUCKET",
+      "bucket_name": "thesoulmixtape-artwork"
     }
   ]
 }
