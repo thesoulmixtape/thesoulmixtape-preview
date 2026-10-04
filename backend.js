@@ -639,6 +639,30 @@
       throw new Error(data?.error || `Could not remove old R2 audio (${response.status}).`);
     }
   }
+  async function uploadR2Artwork(file,session){
+    const response=await fetch(`${AUDIO_WORKER_URL}/artwork/upload`,{
+      method:'POST',
+      headers:{'Authorization':`Bearer ${session.access_token}`,'Content-Type':file.type},
+      body:file
+    });
+    const data=await response.json().catch(()=>null);
+    if(!response.ok) throw new Error(data?.error || `Could not upload artwork (${response.status}).`);
+    if(!data?.key || artworkStoragePath(data.artwork_url)!==`r2:${data.key}`) throw new Error('The artwork service returned an invalid response.');
+    return {bucket:'tsm-artwork',path:`r2:${data.key}`,url:data.artwork_url};
+  }
+  async function deleteR2Artwork(path){
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session?.access_token) throw new Error('Your contributor session has expired. Please sign in again.');
+    const response=await fetch(`${AUDIO_WORKER_URL}/artwork/object`,{
+      method:'DELETE',
+      headers:{'Authorization':`Bearer ${session.access_token}`,'Content-Type':'application/json'},
+      body:JSON.stringify({key:path.slice(3)})
+    });
+    if(!response.ok){
+      const data=await response.json().catch(()=>null);
+      throw new Error(data?.error || `Could not remove old artwork (${response.status}).`);
+    }
+  }
   async function uploadMedia(file,bucket,kind,onProgress){
     if(!file) return null;
     if(kind==='image'){
@@ -653,6 +677,7 @@
     if(!session?.user) throw new Error('Your contributor session has expired. Please sign in again.');
     if(!profile?.active) throw new Error('This account is not approved for uploads.');
     if(kind==='audio' && bucket==='r2-audio') return uploadR2Audio(file,session,onProgress);
+    if(kind==='image') return uploadR2Artwork(file,session);
     const token=(crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)+Date.now().toString(36));
     const path=`${session.user.id}/${Date.now()}-${token}.${cleanExt(file)}`;
     const {error}=await sb.storage.from(bucket).upload(path,file,{cacheControl:'3600',upsert:false,contentType:file.type || undefined});
@@ -660,11 +685,21 @@
     return {bucket,path,url:kind==='audio' ? path : publicObjectUrl(bucket,path)};
   }
   async function cleanupUploads(items){
-    await Promise.allSettled((items||[]).map(x=>x.bucket==='r2-audio' ? deleteR2Audio(x.path || x.url) : sb.storage.from(x.bucket).remove([x.path])));
+    await Promise.allSettled((items||[]).map(x=>{
+      if(x.bucket==='r2-audio') return deleteR2Audio(x.path || x.url);
+      if(x.bucket==='tsm-artwork' && String(x.path).startsWith('r2:')) return deleteR2Artwork(x.path);
+      return sb.storage.from(x.bucket).remove([x.path]);
+    }));
   }
 
   function artworkStoragePath(url){
     if(!url) return '';
+    try{
+      const parsed=new URL(url);
+      if(parsed.origin===new URL(AUDIO_WORKER_URL).origin && /^\/artwork\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(jpg|png|webp)$/i.test(parsed.pathname)){
+        return `r2:${parsed.pathname.slice('/artwork/'.length)}`;
+      }
+    }catch{return '';}
     const marker='/storage/v1/object/public/tsm-artwork/';
     const i=String(url).indexOf(marker);
     return i<0 ? '' : decodeURIComponent(String(url).slice(i+marker.length));
@@ -741,6 +776,7 @@
       };
       const {error}=await sb.from('tracks').update(patch).eq('id',editingTrack.id);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
 
       // Only remove superseded media after the database points safely at the replacements.
       const old=[];
@@ -831,6 +867,7 @@
       };
       const {error}=await sb.from('podcast_episodes').update(patch).eq('id',editingPodcast.id);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
 
       const old=[];
       if(artFile && editingPodcast.artwork_url){
@@ -915,6 +952,7 @@
       };
       const {error}=await sb.from('articles').update(patch).eq('id',editingArticle.id);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
       if(coverFile && editingArticle.cover_url){
         const oldPath=artworkStoragePath(editingArticle.cover_url);
         if(oldPath) await cleanupUploads([{bucket:'tsm-artwork',path:oldPath}]);
@@ -949,6 +987,7 @@
       const payload=buildPayload(raw,urls);
       const {error}=await sb.from(table).insert(payload);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
       showMessage(form,'Saved.');
       form.reset();
       await loadContentList();
