@@ -639,6 +639,30 @@
       throw new Error(data?.error || `Could not remove old R2 audio (${response.status}).`);
     }
   }
+  async function uploadR2Artwork(file,session){
+    const response=await fetch(`${AUDIO_WORKER_URL}/artwork/upload`,{
+      method:'POST',
+      headers:{'Authorization':`Bearer ${session.access_token}`,'Content-Type':file.type},
+      body:file
+    });
+    const data=await response.json().catch(()=>null);
+    if(!response.ok) throw new Error(data?.error || `Could not upload artwork (${response.status}).`);
+    if(!data?.key || artworkStoragePath(data.artwork_url)!==`r2:${data.key}`) throw new Error('The artwork service returned an invalid response.');
+    return {bucket:'tsm-artwork',path:`r2:${data.key}`,url:data.artwork_url};
+  }
+  async function deleteR2Artwork(path){
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session?.access_token) throw new Error('Your contributor session has expired. Please sign in again.');
+    const response=await fetch(`${AUDIO_WORKER_URL}/artwork/object`,{
+      method:'DELETE',
+      headers:{'Authorization':`Bearer ${session.access_token}`,'Content-Type':'application/json'},
+      body:JSON.stringify({key:path.slice(3)})
+    });
+    if(!response.ok){
+      const data=await response.json().catch(()=>null);
+      throw new Error(data?.error || `Could not remove old artwork (${response.status}).`);
+    }
+  }
   async function uploadMedia(file,bucket,kind,onProgress){
     if(!file) return null;
     if(kind==='image'){
@@ -653,6 +677,7 @@
     if(!session?.user) throw new Error('Your contributor session has expired. Please sign in again.');
     if(!profile?.active) throw new Error('This account is not approved for uploads.');
     if(kind==='audio' && bucket==='r2-audio') return uploadR2Audio(file,session,onProgress);
+    if(kind==='image') return uploadR2Artwork(file,session);
     const token=(crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)+Date.now().toString(36));
     const path=`${session.user.id}/${Date.now()}-${token}.${cleanExt(file)}`;
     const {error}=await sb.storage.from(bucket).upload(path,file,{cacheControl:'3600',upsert:false,contentType:file.type || undefined});
@@ -660,11 +685,21 @@
     return {bucket,path,url:kind==='audio' ? path : publicObjectUrl(bucket,path)};
   }
   async function cleanupUploads(items){
-    await Promise.allSettled((items||[]).map(x=>x.bucket==='r2-audio' ? deleteR2Audio(x.path || x.url) : sb.storage.from(x.bucket).remove([x.path])));
+    await Promise.allSettled((items||[]).map(x=>{
+      if(x.bucket==='r2-audio') return deleteR2Audio(x.path || x.url);
+      if(x.bucket==='tsm-artwork' && String(x.path).startsWith('r2:')) return deleteR2Artwork(x.path);
+      return sb.storage.from(x.bucket).remove([x.path]);
+    }));
   }
 
   function artworkStoragePath(url){
     if(!url) return '';
+    try{
+      const parsed=new URL(url);
+      if(parsed.origin===new URL(AUDIO_WORKER_URL).origin && /^\/artwork\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(jpg|png|webp)$/i.test(parsed.pathname)){
+        return `r2:${parsed.pathname.slice('/artwork/'.length)}`;
+      }
+    }catch{return '';}
     const marker='/storage/v1/object/public/tsm-artwork/';
     const i=String(url).indexOf(marker);
     return i<0 ? '' : decodeURIComponent(String(url).slice(i+marker.length));
@@ -741,6 +776,7 @@
       };
       const {error}=await sb.from('tracks').update(patch).eq('id',editingTrack.id);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
 
       // Only remove superseded media after the database points safely at the replacements.
       const old=[];
@@ -831,6 +867,7 @@
       };
       const {error}=await sb.from('podcast_episodes').update(patch).eq('id',editingPodcast.id);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
 
       const old=[];
       if(artFile && editingPodcast.artwork_url){
@@ -915,6 +952,7 @@
       };
       const {error}=await sb.from('articles').update(patch).eq('id',editingArticle.id);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
       if(coverFile && editingArticle.cover_url){
         const oldPath=artworkStoragePath(editingArticle.cover_url);
         if(oldPath) await cleanupUploads([{bucket:'tsm-artwork',path:oldPath}]);
@@ -949,6 +987,7 @@
       const payload=buildPayload(raw,urls);
       const {error}=await sb.from(table).insert(payload);
       if(error) throw error;
+      uploads.length=0; // Saved media must survive any subsequent UI refresh failure.
       showMessage(form,'Saved.');
       form.reset();
       await loadContentList();
@@ -1144,3 +1183,116 @@
   loadPublishedContent();
   setTimeout(()=>refreshSessionUI(false),80);
 })();
+
+// v44.13 opt-in migration panel. Uses existing authenticated APIs and RLS.
+(function () {
+  if (new URLSearchParams(location.search).get('artworkMigration') !== '1') return;
+  const records = [{"kind":"tracks","id":"94b3ab90-9619-4b18-a59b-9d4590f8ca4d","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788720222027-7385363b-a402-4147-8e6a-58ca5192db2e.png","filename":"7385363b-a402-4147-8e6a-58ca5192db2e.png","bytes":3094181,"sha256":"352c9b47457339d40b21e39118620f1b9e924338e2a52ab4ad550edee12c8e3e"},{"kind":"tracks","id":"d05d3bb5-2917-4256-a9e9-9e964f8e1cdb","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787499376679-d184a47c-0795-4025-a433-61d1ea771df7.jpeg","filename":"d184a47c-0795-4025-a433-61d1ea771df7.jpg","bytes":147931,"sha256":"2d7c34bf6a5f8d895159935b782dcc3af855c1cc277015f0e16151d500e42309"},{"kind":"tracks","id":"937eb1d0-eb24-41aa-8f8e-924da727f0bb","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787499538133-12bf9cb6-7341-4187-acab-2115f30645db.jpeg","filename":"12bf9cb6-7341-4187-acab-2115f30645db.jpg","bytes":293146,"sha256":"c9461369960768229464ec8505bfc4c782cea43aedc7414428c6c2e30a28588e"},{"kind":"tracks","id":"ed67d1d6-abc3-448a-afaf-8b132bbc20ec","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788105857692-e32f1f4d-49d6-4b0c-8812-f27b61f26106.png","filename":"e32f1f4d-49d6-4b0c-8812-f27b61f26106.png","bytes":3259429,"sha256":"7e93cc17fce15ad81a026f1b7ff3bf32ca6db8604fedb6b338e8917e8d674c1a"},{"kind":"tracks","id":"e9033a54-74fd-4ac3-9fd1-c37315ebca78","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787498936126-4db300ed-0dd7-43fb-949e-a39f7e73f28d.jpeg","filename":"4db300ed-0dd7-43fb-949e-a39f7e73f28d.jpg","bytes":335604,"sha256":"bf69b3e9dfe1494eb4f4be782510cab4fd2a6a695a1a228cd8add2912345648a"},{"kind":"tracks","id":"acf7885f-bebd-4c43-a78b-c11c66cb49cc","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788050930685-ae9750f2-cda6-455b-97b8-40feca9a95d7.png","filename":"ae9750f2-cda6-455b-97b8-40feca9a95d7.png","bytes":3343180,"sha256":"d640ce9d2ef4a3e988f5a6aeff025d82211e5f7633051c35a456b4e64bcd56d3"},{"kind":"tracks","id":"5e23f10d-ce24-44ec-a9ea-d9ba28b3fd0e","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787414438512-10ee7c2f-dfff-49f6-999d-5dceb4cd09a9.jpeg","filename":"10ee7c2f-dfff-49f6-999d-5dceb4cd09a9.jpg","bytes":176507,"sha256":"165ea76185c84a95629e537bb41f2b450aa13a9b9e47637c7760b80831acd6eb"},{"kind":"tracks","id":"7e54e998-ff15-4c85-8850-9acb33300f3a","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787499450840-6bb5abd9-7f61-428e-b389-8a43a382f4b1.jpeg","filename":"6bb5abd9-7f61-428e-b389-8a43a382f4b1.jpg","bytes":298228,"sha256":"1cb611ffd5d061608d6731f1a80264708d001a8aa38e2cd387616ce949308463"},{"kind":"tracks","id":"71924a84-ae93-4924-abef-fedb4d94be42","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787492904269-40ae61e4-64ca-4097-9c38-3c06378cf4bb.jpeg","filename":"40ae61e4-64ca-4097-9c38-3c06378cf4bb.jpg","bytes":318265,"sha256":"7ed486523c00299edbbf179738677f1aff62b75332a8adb984e9e8638ccf8efb"},{"kind":"tracks","id":"f8733aee-13ed-49d0-a27e-3164412729cd","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787955404340-308b2a74-6628-48e8-9187-e5701faa8af7.png","filename":"308b2a74-6628-48e8-9187-e5701faa8af7.png","bytes":3487716,"sha256":"a3fca0c8139c54e9783d3ac5cd1be3d28030b90f8090ae752d4b849e61af742c"},{"kind":"tracks","id":"ee247ba8-05fa-4ada-a0da-8e3ed64f7f58","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787499295884-1712cc0d-2a1f-4e16-9772-a5e7239374ca.jpeg","filename":"1712cc0d-2a1f-4e16-9772-a5e7239374ca.jpg","bytes":836787,"sha256":"d6852693303e5b863bd384193ebbca831d29ed933e19083a33ad4e784fd2e4e1"},{"kind":"tracks","id":"15d51129-4d00-4f7b-95e9-da61f25a2b28","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788106441350-4e24db8d-9d75-4ec6-9c21-52fc9b1b89bc.png","filename":"4e24db8d-9d75-4ec6-9c21-52fc9b1b89bc.png","bytes":3768307,"sha256":"a5ffd8d3246e1fae449e41c17f140c3d8e411565ddec8ecdc5f208108b6c72ee"},{"kind":"tracks","id":"91b2b372-cfb7-46d0-bd30-9ccf84f98fd4","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788050960120-986aac75-bf59-4427-8699-55b9a75f8bef.png","filename":"986aac75-bf59-4427-8699-55b9a75f8bef.png","bytes":3261942,"sha256":"925ae47ba0d3008397e111254b442b68f5dff9036fd8ad69b47114fbea8c0561"},{"kind":"tracks","id":"2a592562-3d00-4bc9-a6a0-90b35bb0d713","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788483863787-42f6a0c5-5556-4bad-a46b-50e4b56bc0f1.jpeg","filename":"42f6a0c5-5556-4bad-a46b-50e4b56bc0f1.jpg","bytes":1202598,"sha256":"ed042d9af111c9f90133967a45f0e42cc9df53729c8e23b2e5bed50730f96a11"},{"kind":"tracks","id":"9f7cec90-89a7-4d2c-9ea9-d4d8d07c6590","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788482804042-6b71db3e-3625-400d-b7eb-51f1abe285ae.png","filename":"6b71db3e-3625-400d-b7eb-51f1abe285ae.png","bytes":2218820,"sha256":"c5b058fba98ad5542c4391cd4259bfcc760ff3861f553d64ba72bf5dfa9bfbcf"},{"kind":"tracks","id":"c180c24b-99dc-4ea4-9206-a6f7a62a706c","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1789034359375-8ecf6fb3-6ade-4dd3-9341-ef977eb0b48f.png","filename":"8ecf6fb3-6ade-4dd3-9341-ef977eb0b48f.png","bytes":3434281,"sha256":"09e7341b8d62289284d4673f93cb8e32571bd9c634c7d1bf27000535b3b15e54"},{"kind":"tracks","id":"89be3bd4-c0e6-485c-954b-e446254ba96c","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1789034497120-24107d4a-5912-4df9-a900-3a294fcf07c7.png","filename":"24107d4a-5912-4df9-a900-3a294fcf07c7.png","bytes":3512544,"sha256":"4217f94b2c06c74630b0040051128cd7c32a761b71f7d87f896ae9d454bdab58"},{"kind":"podcast_episodes","id":"5b6bbfbb-aca9-43eb-a0bd-cac915c59eb5","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103122774-b7df2b7a-28c5-4fab-b953-ac1a7c210ab2.png","filename":"b7df2b7a-28c5-4fab-b953-ac1a7c210ab2.png","bytes":2510304,"sha256":"3b858fd6ff0edf39071185bf00b7c835c019926ed4894bd5f9892b1245a9ac77"},{"kind":"podcast_episodes","id":"56d1e1c3-23b6-451c-a9b0-04d3ce7422ac","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104262881-136f8ace-9cd3-47b3-a05e-1f0cc571bb84.png","filename":"136f8ace-9cd3-47b3-a05e-1f0cc571bb84.png","bytes":3674914,"sha256":"95172da1721ae6a4d6dc4db2400e626fae5922f0176c6f56b39ac011389281e9"},{"kind":"podcast_episodes","id":"1bd81660-58f2-4672-a4a0-daf76b355106","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103288334-97faa313-1a76-4e8b-9bb7-ce4f053d502e.png","filename":"97faa313-1a76-4e8b-9bb7-ce4f053d502e.png","bytes":2990349,"sha256":"2a997cb4fdcfc6f3822441f4205a7b9aac7d2b3fe287e41c409db5390f204e84"},{"kind":"podcast_episodes","id":"5c00acbb-bfa3-47ae-a1b0-eeb181d93cde","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103173552-66dbe3ef-c1eb-41ea-b6e1-dcac83afea83.png","filename":"66dbe3ef-c1eb-41ea-b6e1-dcac83afea83.png","bytes":2879080,"sha256":"d8f7d3937d35f36335bed9d435dd46ef8ee9049f004aabaa19771a867dabd756"},{"kind":"podcast_episodes","id":"87914936-5bf7-4998-b335-5cb52a2a1153","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103537021-db567ba0-154d-4320-bdf8-2b1927304600.png","filename":"db567ba0-154d-4320-bdf8-2b1927304600.png","bytes":2921767,"sha256":"f831f0e8e027e5d8ea9bd4f0cae4c5d154c93a7530a5f778a6bd87d152ece567"},{"kind":"podcast_episodes","id":"94f8b14e-429f-4e33-a27c-96b660c894ed","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103374950-f485b571-f453-4a23-8a19-91b3a097d7c1.png","filename":"f485b571-f453-4a23-8a19-91b3a097d7c1.png","bytes":3260611,"sha256":"e8c55be23c4eaeb62a5f969ec4f7214507aa2598294a9c415a7b011a6b13c3a2"},{"kind":"podcast_episodes","id":"52af1f22-f9d2-410b-8a43-5a92fa442a23","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103778345-eaf0576e-98a0-44ab-ad3e-d2154c4a0c17.png","filename":"eaf0576e-98a0-44ab-ad3e-d2154c4a0c17.png","bytes":2723957,"sha256":"d921eb8b9a881d7f6468c4008b85999d248c18426b2c3cc655737a8e871bdaa9"},{"kind":"podcast_episodes","id":"f88d043c-78a2-46fc-a602-0661a1fe334a","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104343592-0769d464-bfd9-4a4a-bd9e-8b0d852657fd.png","filename":"0769d464-bfd9-4a4a-bd9e-8b0d852657fd.png","bytes":3222172,"sha256":"08b21fdcf23149738a510b15dbc5b8806c2153527968bec3bc9e7e43ed1a3fe6"},{"kind":"podcast_episodes","id":"b8ad41b9-5156-4681-b9e9-8004e5213b98","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104478025-7c3ef512-afa1-4960-a3e9-5441b03f2934.png","filename":"7c3ef512-afa1-4960-a3e9-5441b03f2934.png","bytes":3017421,"sha256":"775f8b39d26d5abd3d5e8721f490c542411a31d81c9eedf459a0c243161ca3f2"},{"kind":"podcast_episodes","id":"ccc1fee5-ab67-4312-8f2d-5db02a1dbe38","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104418291-301ffbc5-d7fb-40b5-9de7-a77bae1504e1.png","filename":"301ffbc5-d7fb-40b5-9de7-a77bae1504e1.png","bytes":2666764,"sha256":"4fae8af4056fcc4939ebcf7817d84f82133d85b26ba5545fee7b5d3294003893"},{"kind":"podcast_episodes","id":"6536bf4c-a124-444d-8a9a-1938bb95ad36","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103832316-3e3eee6a-0aed-4019-aad9-2004acc79e20.png","filename":"3e3eee6a-0aed-4019-aad9-2004acc79e20.png","bytes":2317673,"sha256":"44cbb2a9f9a75368673385739cf43bb3a7ead50da6b6e129d9b163dae7cc56fe"},{"kind":"podcast_episodes","id":"aeb1c29a-c9ea-47b8-8ce7-ce4630558971","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104191925-2de6a6d9-f2c2-48b6-8f23-293a1f605ee8.png","filename":"2de6a6d9-f2c2-48b6-8f23-293a1f605ee8.png","bytes":3222764,"sha256":"8b00efda86ce7e4c04000d52a7323a94a3f95cbde1d4eac67c55babfef0f770c"},{"kind":"podcast_episodes","id":"aa0ac4b3-58da-4916-9517-35ef21a7cb3e","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104117982-befe2853-cb60-4ce7-83bf-0d05bc4c5977.png","filename":"befe2853-cb60-4ce7-83bf-0d05bc4c5977.png","bytes":3280167,"sha256":"18542b3ff890562a6e748ab7f181c231d0f76e27d698c36225431b07c9fd64c8"},{"kind":"podcast_episodes","id":"5197113c-8e61-4434-8029-17ea5d8f69c0","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104029430-a9c76184-2a18-434c-ad06-724be5f48de7.png","filename":"a9c76184-2a18-434c-ad06-724be5f48de7.png","bytes":2859376,"sha256":"9d0d0792943852d9b8eb0b9b9929c94aaaa842fba10544671ae42fb4b270f0c9"},{"kind":"podcast_episodes","id":"a5156511-4c94-4ed0-8967-f651860ceb09","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103922354-8f12e29c-1f21-44fd-9bbb-ffad77825c32.png","filename":"8f12e29c-1f21-44fd-9bbb-ffad77825c32.png","bytes":2870834,"sha256":"ca0f97995ba30f81a2a2e934c754edb4f27df0757e231f526625cd91264dcf8a"},{"kind":"podcast_episodes","id":"1dc34f17-f9ac-4671-8e04-d44c2f8d55b7","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103724852-74d381b9-608d-449a-bb5e-205c2d22edff.png","filename":"74d381b9-608d-449a-bb5e-205c2d22edff.png","bytes":2985671,"sha256":"ac2fc353db2219ec6a7bcd43455504b9b2a77403e5c85c198b275143f8435cf2"},{"kind":"podcast_episodes","id":"42dd7c3b-646c-4d1b-86b9-82f276440794","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103414754-8d4d0547-e17c-485e-82b0-844f6f0800ca.png","filename":"8d4d0547-e17c-485e-82b0-844f6f0800ca.png","bytes":2921767,"sha256":"f831f0e8e027e5d8ea9bd4f0cae4c5d154c93a7530a5f778a6bd87d152ece567"},{"kind":"podcast_episodes","id":"cfdab427-6f84-4b0a-baf8-7aa30a9d1b5e","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788102971590-2bfa2c78-55cf-46cd-b575-34fee8941908.png","filename":"2bfa2c78-55cf-46cd-b575-34fee8941908.png","bytes":2800074,"sha256":"dab4398b96edc3ba3d5d4683754321d8a1989b1cbf0ad452eb91fdf13f50dbf7"},{"kind":"podcast_episodes","id":"dcbc632a-8968-45c2-95fe-8b6981452420","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788104553825-9896bee7-5130-4e22-b6f4-f15ef8bfbcf0.png","filename":"9896bee7-5130-4e22-b6f4-f15ef8bfbcf0.png","bytes":2380282,"sha256":"f26af568628504efa184c5ee82d04eda3943e400f3a4c179a02ae94a13e0a30d"},{"kind":"podcast_episodes","id":"89e8e3a8-c17e-40bf-992e-25aae84cecb1","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103676700-a3e5e36e-d83b-47fd-adca-ba19d1691c61.png","filename":"a3e5e36e-d83b-47fd-adca-ba19d1691c61.png","bytes":2577740,"sha256":"42cd1e80832647f9721f9a9a7a2bc46dc07541347e6f4b35d1c129348ac6225b"},{"kind":"podcast_episodes","id":"d7e5cd5d-595d-4bca-9fcb-9fab6d4a3a08","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1788103221258-ba199a96-a89c-47d9-a3d6-f3ac4a0e559a.png","filename":"ba199a96-a89c-47d9-a3d6-f3ac4a0e559a.png","bytes":2786964,"sha256":"b83432d3050bb0255e565ab40022c644b952b3d249ac0fa65197592c32eb2595"},{"kind":"articles","id":"d113b47d-6ca5-49b5-bd65-9f5b49085099","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1787671810507-dbc594b3-5987-4bef-b8ce-4098115802fa.png","filename":"dbc594b3-5987-4bef-b8ce-4098115802fa.png","bytes":2620210,"sha256":"28340e826e5242c23a8d56d933cd56e0f11a3577de1b6e374885d20c21e48fda"},{"kind":"articles","id":"47f548cb-6d69-4008-bd78-7295d45c6268","url":"https://yzeprmubwogcscmnvoow.supabase.co/storage/v1/object/public/tsm-artwork/60663e87-e2ac-453f-ac6d-8c659ae666fc/1789083109594-5528774e-4631-464c-a08c-bdc7b4266eef.png","filename":"5528774e-4631-464c-a08c-bdc7b4266eef.png","bytes":3822654,"sha256":"6eed590da00d28741895610db43cf8c14304fe44f16f86485648fe841c964dda"}];
+  const sb = window.tsmSupabase;
+  const worker = 'https://thesoulmixtape-media.thesoulmixtape.workers.dev';
+  const storageKey = 'tsm-artwork-migration-v4413-20261005';
+  const panel = document.createElement('section');
+  panel.style.cssText = 'position:fixed;inset:8px;z-index:2147483647;background:#fff;color:#111;padding:24px;overflow:auto;font:18px/1.5 system-ui';
+  panel.innerHTML = '<h2>Artwork migration</h2><p>Sign in as administrator in The Back Room first, on this same preview address. Keep this tab open during copying.</p><p>Step 1 copies and checks 40 covers. Step 2 changes artwork links in the shared database, affecting both preview and live websites. No originals, audio or empty uploads will be deleted.</p><button id="art-copy">1. Copy and verify covers</button> <button id="art-switch" disabled>2. Switch verified links</button> <button id="art-close">Close</button><pre id="art-log" style="white-space:pre-wrap" role="status" aria-live="polite">Ready. Nothing has changed.</pre>';
+  document.body.append(panel);
+  const copy = panel.querySelector('#art-copy'), change = panel.querySelector('#art-switch');
+  const close = panel.querySelector('#art-close'), log = panel.querySelector('#art-log');
+  for (const b of [copy,change,close]) b.style.cssText = 'padding:16px;margin:6px;font:inherit';
+  close.onclick = () => panel.remove();
+  let busy = false, verified = false, saved = {};
+  function note(s) { log.textContent = s; }
+  function save() { localStorage.setItem(storageKey, JSON.stringify(saved)); }
+  function column(r) { return r.kind === 'articles' ? 'cover_url' : 'artwork_url'; }
+  function validURL(url) {
+    if (typeof url !== 'string') return false;
+    const u = new URL(url);
+    return u.origin === worker && !u.search && !u.hash && /^\/artwork\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(png|jpg|webp)$/i.test(u.pathname);
+  }
+  async function admin() {
+    const { data, error } = await sb.auth.getUser();
+    if (error || !data?.user) throw new Error('Please sign in through The Back Room on this preview address, then reopen this page.');
+    const p = await sb.from('profiles').select('role,active').eq('user_id',data.user.id).single();
+    if (p.error || !p.data?.active || p.data.role !== 'admin') throw new Error('An active administrator account is required.');
+    const s = await sb.auth.getSession();
+    if (s.error || !s.data?.session?.access_token) throw new Error('Session expired. Sign in again.');
+    return s.data.session.access_token;
+  }
+  async function checkedBytes(url,r) {
+    const res = await fetch(url,{cache:'no-store',redirect:'error',signal:AbortSignal.timeout(90000)});
+    if (!res.ok) throw new Error('Image request failed: HTTP '+res.status);
+    const type = (res.headers.get('content-type') || '').split(';')[0];
+    if (!['image/png','image/jpeg','image/webp'].includes(type)) throw new Error('Unexpected image content type.');
+    const bytes = await res.arrayBuffer();
+    if (bytes.byteLength !== r.bytes) throw new Error('Image size mismatch; no link changed.');
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
+    if (hash !== r.sha256) throw new Error('Image checksum mismatch; no link changed.');
+    return new Blob([bytes],{type});
+  }
+  async function current(r) {
+    const result = await sb.from(r.kind).select(column(r)).eq('id',r.id).single();
+    if (result.error) throw result.error;
+    return result.data[column(r)];
+  }
+  async function copyAll() {
+    await admin();
+    saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('Invalid saved progress. Stop and ask for help.');
+    save(); // Check progress storage before uploading anything.
+    let count = 0;
+    for (const r of records) {
+      note('Copy/check '+(count+1)+' of '+records.length+'…');
+      const existing = await current(r);
+      if (existing !== r.url && existing !== saved[r.id]) throw new Error('Artwork was changed since the migration was prepared: '+r.id+'. Stopped without overwriting it.');
+      if (!saved[r.id]) {
+        const bytes = await checkedBytes(r.url,r);
+        const token = await admin();
+        const res = await fetch(worker+'/artwork/upload',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':bytes.type},body:bytes,signal:AbortSignal.timeout(90000)});
+        const uploaded = await res.json();
+        if (!res.ok) throw new Error(uploaded.error || 'Upload failed: HTTP '+res.status);
+        if (!validURL(uploaded.artwork_url) || uploaded.artwork_url !== worker+'/artwork/'+uploaded.key) throw new Error('Unexpected upload response.');
+        saved[r.id] = uploaded.artwork_url;
+        save(); // Resume this exact upload if verification is interrupted.
+      }
+      if (!validURL(saved[r.id])) throw new Error('Invalid saved destination.');
+      await checkedBytes(saved[r.id],r);
+      count++;
+    }
+    verified = true;
+    note('All '+count+' covers copied and checksum-verified. Links have not been switched by Step 1. Step 2 affects the live site too.');
+  }
+  async function switchAll() {
+    if (!verified) throw new Error('Run Step 1 first.');
+    if (!confirm('Switch these 40 artwork links in the shared live/preview database? Originals stay in Supabase.')) return;
+    await admin();
+    // Preflight the entire set before the first database write.
+    for (const r of records) {
+      note('Rechecking all copies before switching: '+r.filename);
+      if (!validURL(saved[r.id])) throw new Error('Missing verified destination.');
+      await checkedBytes(saved[r.id],r);
+      const url = await current(r);
+      if (url !== r.url && url !== saved[r.id]) throw new Error('Concurrent artwork change. No further links will be switched.');
+    }
+    let count = 0;
+    for (const r of records) {
+      await admin();
+      const col = column(r), next = saved[r.id];
+      if (await current(r) !== next) {
+        const result = await sb.from(r.kind).update({[col]:next}).eq('id',r.id).eq(col,r.url).select('id');
+        if (result.error) throw result.error;
+        if (result.data?.length !== 1) throw new Error('Record changed or update denied; stopped.');
+      }
+      if (await current(r) !== next) throw new Error('Database read-back verification failed.');
+      note('Switched and checked '+(++count)+' of '+records.length+'.');
+    }
+    note('Complete: all '+count+' links switched and read back. Originals remain untouched. Tell Codex to run independent checks.');
+  }
+  async function run(action) {
+    if (busy) return;
+    busy = true; copy.disabled = change.disabled = close.disabled = true;
+    try { await action(); } catch(e) { verified = false; note('Stopped: '+e.message+'\nProgress is retained in this browser. If Step 2 had started, some verified links may already be switched. Originals were not deleted. Use Step 1 to recheck/resume.'); }
+    finally { busy=false;copy.disabled=false;close.disabled=false;change.disabled=!verified; }
+  }
+  copy.onclick = () => { verified=false;return run(copyAll); };
+  change.onclick = () => run(switchAll);
+})();
+
